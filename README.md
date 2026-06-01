@@ -1,4 +1,4 @@
-[한국어 README](README.ko.md) · English
+[한국어 README](docs/README.ko.md) · English
 
 # Paper Pilot
 
@@ -14,7 +14,7 @@ A local-first desktop reader that turns academic PDFs into a persistent research
 ![SQLite](https://img.shields.io/badge/SQLite-local-333333?style=flat-square&labelColor=000000)
 ![AI Agent](https://img.shields.io/badge/AI-agent_bridge-333333?style=flat-square&labelColor=000000)
 
-[한국어 README](README.ko.md)
+[한국어 README](docs/README.ko.md)
 
 ## 📸 See Paper Pilot In Action
 
@@ -47,9 +47,7 @@ Paper readers usually stop at rendering pages. AI chat usually forgets where the
 Paper Pilot is not a generic document viewer with an AI button. It is a paper-reading workflow shaped around how research actually happens:
 
 ```text
-import -> read -> ask -> annotate -> cite -> export
-   ^                                      |
-   └────────────── reusable paper memory ┘
+Import papers -> Read in context -> Ask an agent -> Save the result -> Export when needed
 ```
 
 The core idea is simple: a question about a paper should not disappear into a chat transcript. It should return to the paper as an explanation, highlight, note, citation reason, translation, or exportable artifact.
@@ -80,26 +78,14 @@ Paper Pilot keeps those pieces together.
 
 ## 🧭 The Reading Cycle
 
-```mermaid
-flowchart LR
-  A[Library] --> B[Reader]
-  B --> C[Selection or page context]
-  C --> D[Agent task]
-  D --> E[Explanation / translation / summary]
-  E --> F[Highlight / note / citation card]
-  F --> G[Exportable study bundle]
-  G --> B
-```
+Paper Pilot keeps the reading loop short and visible:
 
-| Stage | What happens | Paper Pilot artifact |
+| Step | Action | Saved output |
 | --- | --- | --- |
-| Collect | Import local PDFs and organize them into folders | Library record |
-| Encounter | Read the PDF with outline, search, zoom, and link previews | Page text + metadata |
-| Ask | Send selected text, page context, or image crop to an agent | AI result |
-| Mark | Save manual or generated highlights | Annotation |
-| Interpret | Translate, summarize, or explain difficult passages | Sidecar / panel result |
-| Cite | Extract references and write citation reasons | Citation card |
-| Carry forward | Export the paper's study state | JSON or ZIP bundle |
+| 1. Collect | Add PDFs and organize them into folders. | Library record |
+| 2. Read | Use outline, zoom, search, translation, and highlights beside the PDF. | Page-aware reading state |
+| 3. Ask | Send selected text, page context, or an image crop to an agent. | Explanation, summary, or answer |
+| 4. Keep | Save useful results as highlights, notes, citation cards, or export bundles. | Persistent paper memory |
 
 ## 🔎 Local RAG for Paper Q&A
 
@@ -116,25 +102,13 @@ This keeps paper Q&A closer to the source document:
 
 ## 🤖 Agent Bridge
 
-Paper Pilot does not hard-code one model provider into the interface. The app writes a structured JSON task, a selected agent processes it, and the result is saved back into the local workspace.
+Paper Pilot does not hard-code one model provider into the interface. The app writes a structured task, a selected agent processes it, and the result is saved back into the local workspace.
 
-```mermaid
-sequenceDiagram
-  participant UI as Paper Pilot UI
-  participant App as Tauri backend
-  participant Outbox as bridge/outbox
-  participant Agent as Codex CLI or Claude Code
-  participant Inbox as bridge/inbox
-  participant DB as SQLite
-
-  UI->>App: Create task from selected paper context
-  App->>Outbox: Write task JSON
-  App->>Agent: Start worker process
-  Agent->>Inbox: Write result JSON
-  UI->>App: Read result
-  App->>DB: Save answer, annotation, or citation
-  DB-->>UI: Refresh the paper workspace
+```text
+Paper context -> bridge task -> Codex CLI / Claude Code -> saved result -> reader update
 ```
+
+This keeps the UI simple while leaving the agent layer replaceable.
 
 Supported provider modes:
 
@@ -255,9 +229,10 @@ paper-pilot/
   src/                 React UI and reading workflow
   src/lib/             AI bridge, RAG, citations, scholarly lookup
   src-tauri/           Tauri backend, SQLite, worker commands
-  docs/images/         README product screenshots
-  bridge/              Local agent task queue; runtime files are ignored
+  docs/                Korean README and product screenshots
 ```
+
+`bridge/`, `dist/`, release artifacts, QA captures, local PDFs, and agent outputs are runtime files. They are created locally and kept out of the repository.
 
 ## 📄 License
 
