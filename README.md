@@ -1,5 +1,3 @@
-[한국어 README](docs/README.ko.md) · English
-
 # Paper Pilot
 
 Your papers. Your questions. Your margins. Your agent.
