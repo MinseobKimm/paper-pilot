@@ -1,0 +1,75 @@
+# Dependencies
+/node_modules/
+
+# Frontend build output
+/dist/
+
+# Tauri / Rust build output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Packaged binaries and local release artifacts
+/release/
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.deb
+*.rpm
+*.AppImage
+*.pdb
+
+# Local Paper Pilot workspace and agent state
+/bridge/*
+!/bridge/.gitkeep
+/outputs/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and dev-server output
+*.log
+*.err.log
+*.out.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+dev-server*.log
+dev-server*.err.log
+dev-server*.out.log
+
+# Local QA screenshots and visual scratch captures
+ui-*.png
+/qa/*.png
+/qa/*.jpg
+/qa/*.jpeg
+/qa/*.webp
+/qa/*.pdf
+/image.png
+
+# Local experiments and personal scratch files
+/MOONLIGHT_PERSONAL_READER_PLAN.md
+/chatgpt-temp-thinking-answer-capture.SKILL.md
+/bridge-installed-skill-test/
+/chatgpt-web-answer-capture/
+/prompts/
+
+# Environment and signing secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+.vscode/
