@@ -155,7 +155,7 @@ Paper Pilot stores its working state locally. The Tauri backend handles PDF impo
 ### 📥 Clone
 
 ```bash
-git clone https://github.com/TaewoooPark/paper-pilot.git
+git clone https://github.com/MinseobKimm/paper-pilot.git
 cd paper-pilot
 ```
 

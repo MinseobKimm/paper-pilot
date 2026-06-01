@@ -155,7 +155,7 @@ Paper Pilot의 작업 상태는 로컬에 저장됩니다. Tauri backend는 PDF 
 ### 📥 Clone
 
 ```bash
-git clone https://github.com/TaewoooPark/paper-pilot.git
+git clone https://github.com/MinseobKimm/paper-pilot.git
 cd paper-pilot
 ```
 
