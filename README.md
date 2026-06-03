@@ -22,17 +22,17 @@ A local-first desktop reader that turns academic PDFs into a persistent research
 
 The library turns a folder of PDFs into a clean reading queue. Add papers into the selected folder, create nested folders like `Math`, search by title, author, year, or abstract, and manage each paper as a compact card with selection and bookmark controls. It is designed to move from collection management to reading without opening a separate citation manager first.
 
-### 🧠 Reader, translation, and AI panel
-
-![Paper Pilot reader workspace](docs/images/paper-pilot-reader.png)
-
-The reader combines four panes in one workspace: an AI outline on the left, the original PDF in the center, a page-aligned translation sidecar, and an AI panel on the right. In the screenshot, Paper Pilot highlights a passage, translates the current page into Korean, extracts a keyword dictionary, generates a 3-line summary, keeps chat ready, and stores a document outline without leaving the paper.
-
-### 🖼️ Visual explanation for figures and regions
+### 🖼️ Visual explanation for figures and equations
 
 ![Paper Pilot visual explanation](docs/images/paper-pilot-image-explain.png)
 
-Image explanation handles figures and cropped page regions. Select a plot, table, equation, or dense visual area and Paper Pilot sends the crop with surrounding paper context to the agent. The result explains what the visual is showing, preserves math notation, and connects the figure back to the paper's argument, which is especially useful when captions are not enough.
+Image explanation handles figures, equations, tables, and cropped page regions. In the screenshot, Paper Pilot recognizes the scaled dot-product attention formula from the PDF crop, keeps the notation readable, explains each term in Korean, and connects the equation back to the paper context.
+
+### 🧠 Reader workspace and AI panel
+
+![Paper Pilot reader workspace](docs/images/paper-pilot-reader.png)
+
+The reader keeps the paper, outline, annotation tools, and AI chat in one workspace. In the screenshot, the Attention paper is open at Figure 2, the left pane shows the detected outline, the center page keeps the original PDF and highlight state, and the right AI panel answers a Korean question with page-grounded references.
 
 > Privacy note. Paper Pilot is built around local files and local state. AI providers only receive the context needed for the task you run, such as selected text, page excerpts, or an image crop. For unpublished papers, choose your agent provider deliberately.
 

@@ -24,17 +24,17 @@ Paper Pilot은 학술 PDF를 오래 남는 연구 작업 공간으로 바꾸는 
 
 라이브러리는 PDF 폴더를 깔끔한 독해 대기열로 바꿉니다. 선택한 폴더에 논문을 추가하고, `Math` 같은 하위 폴더를 만들고, 제목/저자/연도/초록으로 검색하며, 각 논문을 선택과 북마크가 가능한 카드 형태로 관리합니다. 별도 인용 관리자부터 열지 않아도 수집한 논문을 바로 읽기 흐름으로 넘길 수 있게 설계했습니다.
 
-### 🧠 Reader, 번역, AI 패널
-
-![Paper Pilot reader workspace](images/paper-pilot-reader.png)
-
-Reader는 네 개의 작업 영역을 한 화면에 묶습니다. 왼쪽에는 AI outline, 중앙에는 원문 PDF, 오른쪽에는 페이지 정렬 번역 sidecar, 가장 오른쪽에는 AI panel이 있습니다. 스크린샷처럼 선택 구절을 하이라이트하고, 현재 페이지를 한국어로 번역하고, keyword dictionary와 3-line summary를 만들고, 질문 입력창과 document outline을 같은 공간에 유지합니다.
-
-### 🖼️ 그림과 영역 설명
+### 🖼️ 그림, 수식, 영역 설명
 
 ![Paper Pilot visual explanation](images/paper-pilot-image-explain.png)
 
-이미지 설명은 figure나 잘라낸 페이지 영역을 다룹니다. plot, table, equation, architecture diagram, crop 영역을 선택하면 Paper Pilot이 해당 이미지와 주변 논문 맥락을 agent task로 보냅니다. 결과는 그림이 무엇을 비교하는지, 수식 표기가 어떤 의미인지, 그 figure가 논문 주장과 어떻게 연결되는지를 설명합니다. 캡션만으로 부족한 실험 그래프와 수식 많은 페이지에 특히 유용합니다.
+이미지 설명은 figure, equation, table, 잘라낸 페이지 영역을 다룹니다. 스크린샷처럼 Transformer의 scaled dot-product attention 수식을 PDF crop에서 인식하고, 수식 표기를 유지한 채 각 항의 의미를 한국어로 풀어 주며, 해당 수식이 논문 맥락에서 어떤 역할을 하는지 연결해 설명합니다.
+
+### 🧠 Reader 작업 공간과 AI 패널
+
+![Paper Pilot reader workspace](images/paper-pilot-reader.png)
+
+Reader는 논문, 목차, 주석 도구, AI chat을 한 작업 공간에 묶습니다. 스크린샷에서는 Attention 논문이 Figure 2 위치에서 열려 있고, 왼쪽에는 감지된 outline이, 중앙에는 원문 PDF와 하이라이트 상태가, 오른쪽 AI panel에는 페이지 근거가 붙은 한국어 답변이 함께 표시됩니다.
 
 > 개인정보 안내. Paper Pilot은 로컬 파일과 로컬 상태를 중심으로 동작합니다. AI provider에는 사용자가 실행한 작업에 필요한 맥락만 전달됩니다. 예를 들어 선택 텍스트, 페이지 excerpt, 이미지 crop 등이 포함될 수 있습니다. 비공개 논문을 읽을 때는 사용할 agent provider를 신중하게 선택하세요.
 
