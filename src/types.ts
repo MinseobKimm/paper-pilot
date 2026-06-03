@@ -20,7 +20,8 @@ export type AiTaskType =
   | "citationReason"
   | "externalLinkSummary"
   | "outlineDocument"
-  | "recommendPapers";
+  | "recommendPapers"
+  | "defineWordMeanings";
 
 export type FolderRecord = {
   id: string;
@@ -161,6 +162,7 @@ export type AiResultRecord = {
   createdAt: string;
   provider?: AiProviderKind | string;
   model?: string;
+  reasoningEffort?: string;
   providerSessionId?: string;
 };
 
@@ -205,6 +207,7 @@ export type BridgeTask = {
   documentId: string;
   provider: AiProviderKind | string;
   model?: string;
+  reasoningEffort?: string;
   providerSessionId?: string;
   payload: Record<string, unknown>;
   createdAt: string;

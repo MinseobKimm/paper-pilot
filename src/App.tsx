@@ -11,6 +11,7 @@ import {
   ClipboardList,
   Copy,
   Download,
+  Eraser,
   Eye,
   FileArchive,
   FileText,
@@ -19,7 +20,6 @@ import {
   Grid2X2,
   GripVertical,
   Highlighter,
-  Info,
   Languages,
   Library,
   Link,
@@ -53,7 +53,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { isAgentProvider, normalizeAiProviderKind, runAiTask } from "./lib/ai";
 import { citationCardsToBibtex, citationCardsToCsv, extractReferences } from "./lib/citations";
 import { createAutoHighlights, highlightColors } from "./lib/highlights";
@@ -66,6 +66,7 @@ import {
   deleteCitationCard,
   deleteDocument,
   deleteFolders,
+  deleteNote,
   exportDocumentJson,
   exportDocumentZip,
   getAgentProviderStatus,
@@ -159,6 +160,11 @@ type ToastMessage = {
 
 type ReaderAssistantMode = "study" | "quotes";
 
+type ReaderMarkupTool =
+  | { kind: "none" }
+  | { kind: "highlight"; color: string }
+  | { kind: "erase" };
+
 type ReferencePreviewKind =
   | "link"
   | "citation"
@@ -243,6 +249,7 @@ type TextLine = {
   rect: { left: number; top: number; width: number; height: number };
   fontSize: number;
   fontNames: string[];
+  boxes: TextLayerBox[];
 };
 
 type OutlineRow = {
@@ -272,6 +279,54 @@ type AutoHighlightCandidate = {
   reason: string;
 };
 
+type WordMeaningEntry = {
+  id: string;
+  word: string;
+  meaning: string;
+  documentId: string;
+  documentTitle: string;
+  context: string;
+  createdAt: string;
+  source: "ai" | "dictionary" | "local";
+};
+
+type WordMeaningMap = Record<string, WordMeaningEntry[]>;
+
+type OnlineDictionaryCacheEntry = {
+  meaning: string;
+  source: string;
+  fetchedAt: string;
+  parserVersion?: string;
+};
+
+type OnlineDictionaryCache = Record<string, OnlineDictionaryCacheEntry>;
+
+type ParsedWordMeaning = {
+  word: string;
+  meaning: string;
+  context: string;
+};
+
+type DocumentTermCandidate = {
+  term: string;
+  kind: "word" | "phrase";
+  count: number;
+  score: number;
+  contextNeeded: boolean;
+  reason: string;
+  examples: string[];
+};
+
+type WordPopup = {
+  word: string;
+  page: number;
+  sourceSentenceId?: string;
+  context: string;
+  x: number;
+  y: number;
+  side: "left" | "right";
+};
+
 type AiDisplaySection = {
   id: string;
   titleKey: string;
@@ -283,7 +338,16 @@ const explanationTag = "Explanation";
 const explanationColor = "#d9e5ff";
 const explanationTasks = new Set(["explainText", "explainRegionImage"]);
 const chatPlanTaskType: AiTaskType = "chatWithPaperPlan";
-const rightPanelHiddenTasks = new Set(["translatePage", chatPlanTaskType]);
+const wordMeaningTaskType: AiTaskType = "defineWordMeanings";
+const wordMeaningMapSettingKey = "wordMeaningMapJson";
+const wordMeaningLookupEnabledSettingKey = "wordMeaningLookupEnabled";
+const onlineDictionaryCacheSettingKey = "onlineDictionaryCacheJson";
+const onlineDictionaryParserVersion = "ko-direct-v3";
+const onlineDictionarySourceLabel = `Korean dictionary APIs ${onlineDictionaryParserVersion}`;
+const documentWordListSettingPrefix = "documentWordList:";
+const wordMeaningBatchLimit = 120;
+const onlineDictionaryBatchLimit = 180;
+const rightPanelHiddenTasks = new Set(["translatePage", chatPlanTaskType, wordMeaningTaskType]);
 
 const aiDisplaySections: AiDisplaySection[] = [
   {
@@ -319,6 +383,7 @@ const taskLabelKeys: Record<string, string> = {
   externalLinkSummary: "linkSummary",
   outlineDocument: "documentOutline",
   recommendPapers: "paperRecommendations",
+  defineWordMeanings: "wordMeanings",
 };
 
 const annotationFilters = [
@@ -333,19 +398,20 @@ const highlightPalettes = [
   {
     name: "Paper Pilot Basic",
     colors: ["#f7c8d8", "#d9f2dd", "#d8edf1"],
-    tags: ["독창성", "방법", "결과"],
+    tags: ["Originality", "Method", "Result"],
   },
   {
     name: "Deep Spread",
     colors: ["#f0d5c7", "#cbe8df", "#d5e7f5"],
-    tags: ["배경", "근거", "한계"],
+    tags: ["Background", "Evidence", "Limit"],
   },
   {
     name: "Point Stroke",
     colors: ["#f3c9c3", "#b4e3d5", "#c8d9df"],
-    tags: ["문제", "해결", "비교"],
+    tags: ["Problem", "Solution", "Compare"],
   },
 ];
+
 
 const initialState: AppStateRecord = {
   folders: [{ id: "root", parentId: null, name: "Library", createdAt: nowIso() }],
@@ -369,11 +435,17 @@ const initialState: AppStateRecord = {
     autoHighlight: "false",
     aiProvider: "codex-cli",
     aiModel: "",
+    codexModel: "",
+    codexReasoningEffort: "",
+    claudeModel: "",
     bridgePath: "bridge",
     customPrompt: "",
     readerOutlineWidth: "220",
     readerTranslationWidth: "360",
     readerRightPanelWidth: "340",
+    wordMeaningLookupEnabled: "true",
+    wordMeaningMapJson: "{}",
+    onlineDictionaryCacheJson: "{}",
   },
 };
 
@@ -593,6 +665,19 @@ const uiStrings: Record<UiLanguage, UiStrings> = {
     referencePreviewNotFound: "이 참조의 정확한 미리보기 위치를 찾지 못했습니다.",
     invalidExternalUrl: "외부 링크 주소가 올바르지 않아 열지 않았습니다.",
     noteSaved: "노트를 저장했습니다.",
+    noteDeleted: "노트를 삭제했습니다.",
+    deleteNote: "노트 삭제",
+    wordMeanings: "단어 뜻",
+    buildWordMeanings: "단어 뜻 만들기",
+    adjustWordMeaning: "뜻 수정",
+    wordMeaningLookupOn: "단어 뜻 보기 켜짐",
+    wordMeaningLookupOff: "단어 뜻 보기 꺼짐",
+    wordMeaningLoading: "한국어 뜻을 불러오는 중...",
+    wordMeaningNone: "저장된 한국어 뜻이 없습니다.",
+    wordMeaningNoText: "추출된 단어가 없습니다.",
+    wordMeaningNoMissing: "새로 만들 단어 뜻이 없습니다.",
+    wordMeaningAdjustQueued: "단어 뜻 수정 요청을 대기열에 추가했습니다.",
+    reasoningEffort: "추론 강도",
     openDocumentFirst: "먼저 문서를 여세요.",
     openPdfFirst: "먼저 PDF를 여세요.",
     renderPdfFirstForShare: "PDF를 먼저 열어 렌더링한 뒤 공유해 주세요.",
@@ -859,6 +944,19 @@ const uiStrings: Record<UiLanguage, UiStrings> = {
     referencePreviewNotFound: "Could not find the exact preview location for this reference.",
     invalidExternalUrl: "The external link address is invalid and was not opened.",
     noteSaved: "Note saved.",
+    noteDeleted: "Note deleted.",
+    deleteNote: "Delete note",
+    wordMeanings: "Word meanings",
+    buildWordMeanings: "Build word meanings",
+    adjustWordMeaning: "Adjust meaning",
+    wordMeaningLookupOn: "Word meaning popup on",
+    wordMeaningLookupOff: "Word meaning popup off",
+    wordMeaningLoading: "Loading Korean meaning...",
+    wordMeaningNone: "No saved Korean meaning.",
+    wordMeaningNoText: "No extracted words yet.",
+    wordMeaningNoMissing: "No missing word meanings.",
+    wordMeaningAdjustQueued: "Queued word meaning adjustment.",
+    reasoningEffort: "Reasoning effort",
     openDocumentFirst: "Open a document first.",
     openPdfFirst: "Open a PDF first.",
     renderPdfFirstForShare: "Open and render the PDF before sharing.",
@@ -956,12 +1054,97 @@ function translationLanguageLabel(value: string | undefined, uiLanguage: UiLangu
   return uiLanguage === "ko" ? option.ko : option.en;
 }
 
+const providerModelSettingKeys: Record<AiProviderKind, string> = {
+  "codex-cli": "codexModel",
+  "claude-code": "claudeModel",
+  "local-draft": "aiModel",
+};
+
+const providerModelOptions: Record<AiProviderKind, Array<{ value: string; label: string }>> = {
+  "codex-cli": [
+    { value: "gpt-5.5", label: "GPT-5.5 - latest frontier" },
+    { value: "gpt-5.5-pro", label: "GPT-5.5 pro - highest precision" },
+    { value: "gpt-5.4", label: "GPT-5.4 - coding/pro work" },
+    { value: "gpt-5.4-pro", label: "GPT-5.4 pro" },
+    { value: "gpt-5.4-mini", label: "GPT-5.4 mini - faster/lower cost" },
+    { value: "gpt-5.4-nano", label: "GPT-5.4 nano - cheapest GPT-5.4 class" },
+    { value: "gpt-5.2-codex", label: "GPT-5.2-Codex - agentic coding" },
+    { value: "gpt-5.1-codex", label: "GPT-5.1-Codex - agentic coding" },
+    { value: "gpt-5.2", label: "GPT-5.2 - previous frontier" },
+    { value: "gpt-5.1", label: "GPT-5.1 - previous coding model" },
+    { value: "gpt-5", label: "GPT-5" },
+    { value: "gpt-5-mini", label: "GPT-5 mini" },
+    { value: "gpt-5-nano", label: "GPT-5 nano" },
+    { value: "gpt-4.1", label: "GPT-4.1 - non-reasoning" },
+  ],
+  "claude-code": [
+    { value: "sonnet", label: "Claude Sonnet" },
+    { value: "opus", label: "Claude Opus" },
+    { value: "haiku", label: "Claude Haiku" },
+    { value: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
+    { value: "claude-opus-4-20250514", label: "Claude Opus 4" },
+    { value: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
+  ],
+  "local-draft": [],
+};
+
+const codexReasoningEffortOptions = [
+  { value: "", label: "CLI default" },
+  { value: "none", label: "none" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
+  { value: "xhigh", label: "xhigh" },
+];
+
+function providerDisplayName(provider: string | null | undefined) {
+  switch (normalizeAiProviderKind(provider)) {
+    case "claude-code":
+      return "Claude Code";
+    case "local-draft":
+      return "Local draft";
+    case "codex-cli":
+    default:
+      return "Codex CLI";
+  }
+}
+
+function providerModelSettingKey(provider: string | null | undefined) {
+  return providerModelSettingKeys[normalizeAiProviderKind(provider)];
+}
+
+function aiModelForProvider(settings: Record<string, string>, provider: string | null | undefined) {
+  const kind = normalizeAiProviderKind(provider);
+  if (kind === "local-draft") {
+    return "";
+  }
+  return settings[providerModelSettingKeys[kind]] || (kind === normalizeAiProviderKind(settings.aiProvider) ? settings.aiModel || "" : "");
+}
+
+function selectedAiModel(settings: Record<string, string>) {
+  return aiModelForProvider(settings, settings.aiProvider);
+}
+
+function selectedCodexReasoningEffort(settings: Record<string, string>) {
+  const value = (settings.codexReasoningEffort || "").trim().toLowerCase();
+  return codexReasoningEffortOptions.some((option) => option.value === value) ? value : "";
+}
+
+function aiRuntimeLabel(settings: Record<string, string>, ui: UiStrings) {
+  const model = selectedAiModel(settings) || ui.providerDefault;
+  const effort = normalizeAiProviderKind(settings.aiProvider) === "codex-cli" ? selectedCodexReasoningEffort(settings) : "";
+  return effort ? `${providerDisplayName(settings.aiProvider)} / ${model} / ${effort}` : `${providerDisplayName(settings.aiProvider)} / ${model}`;
+}
+
+function wordMeaningLookupEnabled(settings: Record<string, string>) {
+  return settings[wordMeaningLookupEnabledSettingKey] !== "false";
+}
+
 const panelTabs: Array<{ id: PanelTab; label: string; icon: typeof Bot }> = [
   { id: "ai", label: "AI", icon: Bot },
   { id: "activity", label: "Activity", icon: ClipboardList },
   { id: "citations", label: "Citations", icon: Link },
   { id: "notes", label: "Notes", icon: MessageSquareText },
-  { id: "info", label: "Info", icon: Info },
 ];
 
 const defaultReaderZoom = 1.05;
@@ -1154,10 +1337,7 @@ function formatResultTime(value: string) {
 }
 
 function repairLegacyAiOutput(value: string) {
-  return value.replace(
-    /�{4,}\s+\S+\s+�{2,}\S*\.?/g,
-    "명령줄이 너무 깁니다. 다시 실행하면 짧아진 프롬프트로 처리합니다.",
-  );
+  return value;
 }
 
 function cleanAiOutput(value: string, status = "") {
@@ -1236,7 +1416,7 @@ function limitInsightText(sectionId: string, text: string) {
     const sourceLines = lines.length >= 2 ? lines : smartSentenceParts(clean);
     return sourceLines
       .slice(0, 3)
-      .map((line) => line.replace(/^[-*•]\s*/, "").replace(/^\d+[.)]\s*/, "").trim())
+      .map((line) => line.replace(/^[-*\s]+/, "").replace(/^\d+[.)]\s*/, "").trim())
       .filter(Boolean)
       .map((line) => `- ${compactUiText(line, 72)}`)
       .join("\n");
@@ -1302,7 +1482,7 @@ function keywordChipsFromText(text: string, limit = 10) {
     "reasoning",
   ]);
   const counts = new Map<string, number>();
-  for (const word of text.match(/[A-Za-z][A-Za-z-]{3,}|[가-힣]{2,}/g) ?? []) {
+  for (const word of text.match(/[A-Za-z][A-Za-z-]{3,}/g) ?? []) {
     const key = word.toLowerCase();
     if (stop.has(key)) {
       continue;
@@ -1532,10 +1712,11 @@ function selectedPageTextsForPlan(
 function sentenceParts(text: string): string[] {
   return (text || "")
     .replace(/\s+/g, " ")
-    .split(/(?<=[.!?。！？])\s+|(?<=[다요죠함됨임음])\s+(?=[A-Z0-9가-힣])/)
+    .split(/(?<=[.!?])\s+/)
     .map((item) => item.trim())
     .filter((item) => item.length > 1);
 }
+
 
 const nonTerminalPeriodWords = new Set([
   "al",
@@ -1571,11 +1752,11 @@ function isAsciiLetter(value: string) {
 }
 
 function isSentenceTerminator(value: string) {
-  return value === "." || value === "!" || value === "?" || value === "。" || value === "！" || value === "？";
+  return value === "." || value === "!" || value === "?";
 }
 
 function isSentenceCloser(value: string) {
-  return /^[)"'\]}]$/.test(value) || value === "”" || value === "’";
+  return /^[)"'\]}]$/.test(value);
 }
 
 function nextNonSpaceIndex(text: string, index: number) {
@@ -1595,7 +1776,7 @@ function previousPeriodWord(text: string, periodIndex: number) {
 }
 
 function fragmentWordCount(fragment: string) {
-  return fragment.match(/[A-Za-z0-9가-힣]+/g)?.length ?? 0;
+  return fragment.match(/[A-Za-z0-9]+/g)?.length ?? 0;
 }
 
 function isCaptionOrNumberLabel(fragment: string) {
@@ -1630,7 +1811,7 @@ function isNonTerminalPeriod(text: string, periodIndex: number, sentenceStart: n
   if (nonTerminalPeriodWords.has(word)) {
     return true;
   }
-  if (conditionalPeriodWords.has(word) && nextChar && !/[A-Z가-힣]/.test(nextChar)) {
+  if (conditionalPeriodWords.has(word) && nextChar && !/[A-Z]/.test(nextChar)) {
     return true;
   }
   if (word.length === 1 && /^[A-Za-z]$/.test(word)) {
@@ -1747,14 +1928,15 @@ function normalizedOutlineText(value: string) {
 function cleanOutlineTitle(value: string, fallback = "Section") {
   const title = normalizedOutlineText(
     value
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^\s*[-*•]\s+/, "")
-    .replace(/^\s*(?:page|p\.?|페이지|쪽)\s*\d+\s*[:：-]?\s*/i, "")
-    .replace(/\s*\((?:page|페이지|쪽)\s*\d+\)\s*/gi, " "),
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^\s*[-*]\s+/, "")
+      .replace(/^\s*(?:page|p\.?)\s*\d+\s*[:\-]?\s*/i, "")
+      .replace(/\s*\((?:page|p\.?)\s*\d+\)\s*/gi, " "),
   );
   const safe = title || fallback;
   return safe.length > 140 ? `${safe.slice(0, 137).trim()}...` : safe;
 }
+
 
 function outlineLevelFromLine(line: string) {
   const heading = line.match(/^\s*(#{1,6})\s+/);
@@ -1770,7 +1952,7 @@ function outlineLevelFromLine(line: string) {
 }
 
 function inferOutlinePage(line: string, title: string, pages: PageRecord[], fallbackPage: number) {
-  const explicit = line.match(/\b(?:page|p\.?|페이지|쪽)\s*(\d{1,4})\b/i);
+  const explicit = line.match(/\b(?:page|p\.?)\s*(\d{1,4})\b/i);
   if (explicit) {
     const page = Number(explicit[1]);
     if (page >= 1 && page <= Math.max(1, pages.length)) {
@@ -1833,9 +2015,30 @@ function textLinesFromBoxes(boxes: TextLayerBox[]) {
       });
     }
   }
-  return groups
-    .map((group) => {
-      const lineBoxes = [...group.boxes].sort((a, b) => a.rect.left - b.rect.left);
+  const lineRows = groups.flatMap((group) => {
+    const sortedBoxes = [...group.boxes].sort((a, b) => a.rect.left - b.rect.left);
+    const clusters: TextLayerBox[][] = [];
+    for (const box of sortedBoxes) {
+      const current = clusters[clusters.length - 1];
+      const previous = current?.[current.length - 1];
+      if (!current || !previous) {
+        clusters.push([box]);
+        continue;
+      }
+      const previousRight = previous.rect.left + previous.rect.width;
+      const gap = box.rect.left - previousRight;
+      const fontSize = Math.max(previous.fontSize, box.fontSize, 8);
+      const columnGap = Math.max(42, fontSize * 3.2);
+      if (gap > columnGap) {
+        clusters.push([box]);
+      } else {
+        current.push(box);
+      }
+    }
+    return clusters;
+  });
+  const lines = lineRows
+    .map((lineBoxes) => {
       let text = "";
       for (const [index, box] of lineBoxes.entries()) {
         const previous = lineBoxes[index - 1];
@@ -1865,9 +2068,133 @@ function textLinesFromBoxes(boxes: TextLayerBox[]) {
         },
         fontSize: medianNumber(lineBoxes.map((box) => box.fontSize)),
         fontNames: [...new Set(lineBoxes.map((box) => box.fontName).filter(Boolean))],
+        boxes: lineBoxes,
       } satisfies TextLine;
     })
     .filter((line) => line.text.length > 0);
+  if (lines.length < 4) {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const minLeft = Math.min(...lines.map((line) => line.rect.left));
+  const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
+  const span = Math.max(1, maxRight - minLeft);
+  const bodyLines = lines.filter((line) => {
+    const width = line.rect.width;
+    const center = line.rect.left + width / 2;
+    return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
+  });
+  if (bodyLines.length < 4) {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
+  let bestGap = 0;
+  let splitAt = -1;
+  for (let index = 1; index < centers.length; index += 1) {
+    const gap = centers[index] - centers[index - 1];
+    if (gap > bestGap) {
+      bestGap = gap;
+      splitAt = index;
+    }
+  }
+  const twoColumn = splitAt > 0 && bestGap > Math.max(72, span * 0.16);
+  if (!twoColumn) {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const splitX = (centers[splitAt - 1] + centers[splitAt]) / 2;
+  const isFullWidth = (line: TextLine) => line.rect.width > span * 0.72;
+  const columnFor = (line: TextLine) => {
+    return line.rect.left + line.rect.width / 2 >= splitX ? 1 : 0;
+  };
+  const sortSegment = (segment: TextLine[]) =>
+    segment.sort((a, b) => {
+      const columnA = columnFor(a);
+      const columnB = columnFor(b);
+      if (columnA !== columnB) {
+        return columnA - columnB;
+      }
+      return a.rect.top - b.rect.top || a.rect.left - b.rect.left;
+    });
+  const ordered: TextLine[] = [];
+  let segment: TextLine[] = [];
+  for (const line of [...lines].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)) {
+    if (isFullWidth(line)) {
+      ordered.push(...sortSegment(segment));
+      segment = [];
+      ordered.push(line);
+    } else {
+      segment.push(line);
+    }
+  }
+  ordered.push(...sortSegment(segment));
+  return ordered;
+}
+
+function joinHyphenatedLineText(previous: string, next: string) {
+  const left = previous.trimEnd();
+  const right = next.trimStart();
+  if (/[A-Za-z]-$/.test(left) && /^[A-Za-z]/.test(right)) {
+    return `${left.slice(0, -1)}${right}`;
+  }
+  return `${left}\n${right}`;
+}
+
+function textFromOrderedLines(lines: TextLine[]) {
+  return lines.reduce((text, line) => (text ? joinHyphenatedLineText(text, line.text) : line.text), "");
+}
+
+function textAndBoxesFromOrderedLines(lines: TextLine[]) {
+  const text = textFromOrderedLines(lines);
+  const boxes: TextLayerBox[] = [];
+  let textCursor = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const previousLine = lineIndex > 0 ? lines[lineIndex - 1] : null;
+    const joinedHyphen = Boolean(previousLine && /[A-Za-z]-$/.test(previousLine.text.trimEnd()) && /^[A-Za-z]/.test(line.text.trimStart()));
+    if (lineIndex > 0 && !joinedHyphen) {
+      textCursor += 1;
+    }
+    let lineCursor = 0;
+    for (const [boxIndex, box] of line.boxes.entries()) {
+      const raw = box.text.trim();
+      if (!raw) {
+        continue;
+      }
+      const isHyphenatedLineEnd = boxIndex === line.boxes.length - 1 && /[A-Za-z]-$/.test(raw);
+      const indexText = isHyphenatedLineEnd ? raw.slice(0, -1) : raw;
+      const itemIndex = line.text.indexOf(raw, lineCursor);
+      const itemStart = textCursor + (itemIndex >= 0 ? itemIndex : lineCursor);
+      const itemEnd = itemStart + indexText.length;
+      lineCursor = (itemIndex >= 0 ? itemIndex : lineCursor) + raw.length;
+      boxes.push({
+        ...box,
+        text: raw,
+        start: itemStart,
+        end: itemEnd,
+      });
+    }
+    textCursor += line.text.length - (/[A-Za-z]-$/.test(line.text.trimEnd()) ? 1 : 0);
+  }
+  return { text, boxes };
+}
+
+function dehyphenateLineBreaks(text: string) {
+  return text
+    .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pageTextFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+) {
+  const { text } = textBoxesFromPdfItems(items, viewport, scale);
+  const dehyphenated = dehyphenateLineBreaks(text);
+  if (dehyphenated) {
+    return dehyphenated;
+  }
+  return items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
 }
 
 function outlineLevelFromTitle(title: string) {
@@ -1884,11 +2211,11 @@ function outlineLevelFromTitle(title: string) {
 }
 
 const commonOutlineHeadingPattern =
-  /^(abstract|introduction|background|related work|preliminar(?:y|ies)|problem(?: statement| formulation)?|motivation|overview|contributions?|method|methods|methodology|approach|model|models|architecture|design|implementation|algorithm|analysis|experiment|experiments|experimental setup|evaluation|results?|ablation(?: study|s)?|discussion|limitations?|conclusion|references|bibliography|acknowledg(?:e)?ments?|appendix|초록|요약|서론|배경|관련\s*연구|예비|문제\s*정의|문제\s*설정|개요|기여|방법|모델|구조|설계|구현|알고리즘|분석|실험|평가|결과|논의|한계|결론|참고문헌|부록)(?:\b|[\s:：.-]|$)/i;
+  /^(abstract|introduction|background|related works?|preliminar(?:y|ies)|problem(?: statement| formulation)?|motivation|overview|contributions?|method(?:s|ology)?|approach|model(?:s)?|architecture|design|implementation|algorithm|analysis|experiment(?:s)?|experimental setup|evaluation|results?|ablation(?: study|s)?|discussion|limitations?|conclusion|references|bibliography|acknowledg(?:e)?ments?|appendix)(?:\b|[\s:.-]|$)/i;
 
 function numberedOutlineHeading(value: string) {
   const text = normalizedOutlineText(value);
-  const match = text.match(/^(\d{1,2}(?:\.\d{1,2}){0,3}|Appendix\s+[A-Z0-9]+(?:\.\d+)*)(?:[.)]|\s+)\s*(.+)$/i);
+  const match = text.match(/^(\d{1,2}(?:\.\d{1,2}){0,3}|Appendix\s+[A-Z0-9]+(?:\.\d+)*)(?:[.)]|\s+|(?=[A-Z]))\s*(.+)$/i);
   if (!match) {
     return null;
   }
@@ -1903,12 +2230,39 @@ function numberedOutlineHeading(value: string) {
   return { label, title };
 }
 
+function strictNumberedOutlineHeading(value: string) {
+  const text = normalizedOutlineText(value)
+    .replace(/^\s*[-*]\s*/, "")
+    .replace(/^\s*(?:p\.?|page)\s*\d+\s*[:\-]\s*/i, "")
+    .trim();
+  const match = text.match(/^(\d{1,2}(?:\.\d{1,2}){0,4})(?:[.)]\s*|\s+|(?=[A-Z]))(.+)$/);
+  if (!match) {
+    return null;
+  }
+  const label = match[1];
+  const title = match[2].trim();
+  if (!title || !/[\p{L}]/u.test(title)) {
+    return null;
+  }
+  const parts = label.split(".").map((part) => Number(part));
+  if (parts.some((part) => !Number.isFinite(part) || part < 0 || part > 99) || parts[0] < 1 || parts[0] > 30) {
+    return null;
+  }
+  return { label, title, normalizedTitle: `${label} ${title}` };
+}
+
+
 function isOutlineHeadingStart(text: string) {
   return Boolean(numberedOutlineHeading(text));
 }
 
 function commonOutlineHeadingTitle(text: string) {
-  const match = normalizedOutlineText(text).match(commonOutlineHeadingPattern);
+  const normalized = normalizedOutlineText(text);
+  const relatedWorks = normalized.match(/^(related works?)(?:\b|[\s:.-]|$)/i);
+  if (relatedWorks) {
+    return relatedWorks[1].replace(/\s+/g, " ");
+  }
+  const match = normalized.match(commonOutlineHeadingPattern);
   return match?.[1]?.replace(/\s+/g, " ") ?? "";
 }
 
@@ -1918,12 +2272,7 @@ function isCommonOutlineHeading(text: string) {
 
 function cleanDetectedOutlineTitle(value: string) {
   const title = cleanOutlineTitle(value, "");
-  const numbered = numberedOutlineHeading(title);
-  if (numbered) {
-    return title;
-  }
-  const common = commonOutlineHeadingTitle(title);
-  return common || title;
+  return strictNumberedOutlineHeading(title)?.normalizedTitle ?? "";
 }
 
 function isPlausibleDetectedOutlineTitle(title: string) {
@@ -1931,31 +2280,21 @@ function isPlausibleDetectedOutlineTitle(title: string) {
   if (text.length < 3 || text.length > 140) {
     return false;
   }
-  const common = isCommonOutlineHeading(text);
   const numbered = numberedOutlineHeading(text);
-  if (!common && !numbered) {
+  if (!numbered && !isCommonOutlineHeading(text)) {
     return false;
   }
   const body = numbered ? numbered.title : text;
-  const letterCount = (body.match(/[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF가-힣]/g) ?? []).length;
+  const letterCount = (body.match(/[\p{L}]/gu) ?? []).length;
   const digitCount = (body.match(/\d/g) ?? []).length;
-  const mathSymbolCount = (body.match(/[=<>+\-*/^_{}\\|∈∑∏σθλ√≤≥]/g) ?? []).length;
+  const mathSymbolCount = (body.match(/[=<>+\-*/^_{}\\|]/g) ?? []).length;
   if (letterCount < 2) {
     return false;
   }
-  if (!common && digitCount > Math.max(2, letterCount)) {
+  if (!isCommonOutlineHeading(text) && digitCount > Math.max(2, letterCount)) {
     return false;
   }
-  if (mathSymbolCount > Math.max(2, Math.floor(letterCount * 0.35))) {
-    return false;
-  }
-  if (numbered && /^\d+$/.test(numbered.label)) {
-    const firstWord = numbered.title.match(/[A-Za-z가-힣][A-Za-z가-힣-]*/)?.[0] ?? "";
-    if (firstWord && /^[a-z]/.test(firstWord) && !isCommonOutlineHeading(numbered.title)) {
-      return false;
-    }
-  }
-  return true;
+  return mathSymbolCount <= Math.max(2, Math.floor(letterCount * 0.35));
 }
 
 function isPlausibleAiOutlineTitle(title: string) {
@@ -1963,43 +2302,41 @@ function isPlausibleAiOutlineTitle(title: string) {
   if (text.length < 3 || text.length > 140) {
     return false;
   }
-  const letterCount = (text.match(/[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF가-힣]/g) ?? []).length;
+  const letterCount = (text.match(/[\p{L}]/gu) ?? []).length;
   const digitCount = (text.match(/\d/g) ?? []).length;
-  const mathSymbolCount = (text.match(/[=<>+\-*/^_{}\\|∈∑∏σθλ√≤≥]/g) ?? []).length;
+  const mathSymbolCount = (text.match(/[=<>+\-*/^_{}\\|]/g) ?? []).length;
   if (letterCount < 2) {
     return false;
   }
   if (digitCount > Math.max(4, letterCount * 1.2)) {
     return false;
   }
-  if (mathSymbolCount > Math.max(2, Math.floor(letterCount * 0.45))) {
-    return false;
-  }
-  return true;
+  return mathSymbolCount <= Math.max(2, Math.floor(letterCount * 0.45));
 }
+
 
 function isLikelyOutlineHeading(line: TextLine, medianFont: number, leftMargin: number, pageWidth: number) {
   const text = line.text;
   if (text.length < 4 || text.length > 180) {
     return false;
   }
-  const startsLikeHeading = isOutlineHeadingStart(text);
-  if (!startsLikeHeading && !isCommonOutlineHeading(text)) {
+  const numbered = strictNumberedOutlineHeading(text);
+  const startsLikeHeading = Boolean(numbered);
+  if (!startsLikeHeading) {
     return false;
   }
-  const label = startsLikeHeading
-    ? text.match(/^(\d{1,2}(?:\.\d{1,2}){0,3}|Appendix\s+[A-Z0-9]+(?:\.\d+)*)(?:[.)]|\s+)/i)?.[0] ?? ""
-    : "";
-  const remainder = text.slice(label.length).trim();
-  const letterCount = (remainder.match(/[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF가-힣]/g) ?? []).length;
+  const remainder = numbered ? numbered.title : text;
+  const letterCount = (remainder.match(/[\p{L}]/gu) ?? []).length;
   if (letterCount < 2) {
     return false;
   }
   const mathSymbolCount = (remainder.match(/[=<>+\-*/^_{}\\|]/g) ?? []).length;
-  if (mathSymbolCount > Math.max(3, letterCount * 1.2) && !/[A-Za-z가-힣]/.test(remainder)) {
+  if (mathSymbolCount > Math.max(3, letterCount * 1.2) && !/[\p{L}]/u.test(remainder)) {
     return false;
   }
-  if (line.rect.left > leftMargin + pageWidth * 0.18) {
+  const lineCenter = line.rect.left + line.rect.width / 2;
+  const likelyRightColumn = line.rect.left > pageWidth * 0.42 && lineCenter < pageWidth * 0.98;
+  if (!startsLikeHeading && !likelyRightColumn && line.rect.left > leftMargin + pageWidth * 0.18) {
     return false;
   }
   const boldish = line.fontNames.some((name) => /bold|black|heavy|demi|semibold/i.test(name));
@@ -2047,7 +2384,7 @@ function detectedOutlineAnchorsForPage(
         if (verticalGap > line.rect.height * 1.1 || !similarLeft || !similarFont || nextStartsHeading) {
           break;
         }
-        const nextTitle = normalizedOutlineText(`${merged} ${next.text}`);
+        const nextTitle = normalizedOutlineText(joinHyphenatedLineText(merged, next.text).replace(/\n/g, " "));
         if (!isPlausibleDetectedOutlineTitle(cleanDetectedOutlineTitle(nextTitle))) {
           break;
         }
@@ -2088,14 +2425,36 @@ function detectedOutlineAnchorsForPage(
 }
 
 function aiOutlineRowsFromResult(result: AiResultRecord, pages: PageRecord[]): OutlineRow[] {
-  const lines = getReadableAiOutput(result)
+  const readable = getReadableAiOutput(result);
+  try {
+    const parsed = parseAiJson(stripJsonFence(cleanAiOutput(readable)));
+    const rows = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { outline?: unknown }).outline)
+        ? (parsed as { outline: unknown[] }).outline
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as { sections?: unknown }).sections)
+          ? (parsed as { sections: unknown[] }).sections
+          : [];
+    const parsedRows = rows
+      .map((row, order) => (row && typeof row === "object" ? outlineRowFromAiRecord(row as Record<string, unknown>, order, pages) : null))
+      .filter((row): row is OutlineRow & { order: number } => row !== null)
+      .sort(compareOutlineRows)
+      .slice(0, 120)
+      .map(({ order: _order, ...row }) => row);
+    if (parsedRows.length > 0) {
+      return parsedRows;
+    }
+  } catch {
+    // Fall back to line parsing below.
+  }
+  const lines = readable
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 2 && !/^local explanation draft/i.test(line));
   const rows: Array<OutlineRow & { order: number }> = [];
   for (const [order, line] of lines.entries()) {
-    const title = cleanOutlineTitle(line, "");
+    const title = cleanStrictNumberedOutlineTitle(line);
     if (!title || /^(no extracted|task queued|agent)/i.test(title) || !isPlausibleAiOutlineTitle(title)) {
       continue;
     }
@@ -2104,7 +2463,7 @@ function aiOutlineRowsFromResult(result: AiResultRecord, pages: PageRecord[]): O
       id: `ai-outline-${rows.length}-${page}-${title}`,
       page,
       title,
-      level: outlineLevelFromLine(line),
+      level: outlineLevelFromTitle(title),
       source: "ai",
       order,
     });
@@ -2165,6 +2524,34 @@ function outlineRowsFromAnchors(anchors: OutlineAnchor[]) {
     );
 }
 
+function cleanStrictNumberedOutlineTitle(value: string) {
+  const stripped = normalizedOutlineText(value)
+    .replace(/^\s*[-*]\s*/, "")
+    .replace(/^\s*(?:p\.?|page)\s*\d+\s*[:\-]\s*/i, "")
+    .trim();
+  return strictNumberedOutlineHeading(stripped)?.normalizedTitle ?? "";
+}
+
+function outlineRowFromAiRecord(record: Record<string, unknown>, order: number, pages: PageRecord[]): (OutlineRow & { order: number }) | null {
+  const number = String(record.number ?? record.label ?? record.section ?? "").trim();
+  const rawTitle = String(record.title ?? record.heading ?? record.text ?? record.anchorText ?? "").trim();
+  const candidateTitle = cleanStrictNumberedOutlineTitle(number && rawTitle && !rawTitle.startsWith(number) ? `${number} ${rawTitle}` : rawTitle || number);
+  if (!candidateTitle || !isPlausibleAiOutlineTitle(candidateTitle)) {
+    return null;
+  }
+  const rawPage = Number(record.page ?? record.pageNumber ?? record.p);
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? Math.round(rawPage) : inferOutlinePage("", candidateTitle, pages, order + 1);
+  const rawLevel = Number(record.level);
+  return {
+    id: `ai-outline-${order}-${page}-${candidateTitle}`,
+    page,
+    title: candidateTitle,
+    level: Number.isFinite(rawLevel) ? clampNumber(Math.round(rawLevel), 0, 4) : outlineLevelFromTitle(candidateTitle),
+    source: "ai",
+    order,
+  };
+}
+
 function fallbackOutlineRows(pdfRows: OutlineRow[], pages: PageRecord[]): OutlineRow[] {
   if (pdfRows.length) {
     return pdfRows.slice(0, 60);
@@ -2178,6 +2565,82 @@ function fallbackOutlineRows(pdfRows: OutlineRow[], pages: PageRecord[]): Outlin
   }));
 }
 
+function outlineCanonicalKey(title: string) {
+  const cleaned = cleanOutlineTitle(title, "");
+  const numbered = numberedOutlineHeading(cleaned);
+  if (numbered) {
+    return `number:${numbered.label.toLowerCase()}`;
+  }
+  return `title:${normalizeForMatch(cleaned)
+    .replace(/^\d{1,2}(?:\.\d{1,2}){0,3}\s*/, "")
+    .replace(/\bworks\b/g, "work")
+    .replace(/[^a-z0-9]+/g, "")}`;
+}
+
+function outlineNumberParts(title: string) {
+  const label = numberedOutlineHeading(title)?.label ?? "";
+  if (!/^\d+(?:\.\d+)*$/.test(label)) {
+    return [];
+  }
+  return label.split(".").map((part) => Number(part));
+}
+
+function compareOutlineRows(a: OutlineRow, b: OutlineRow) {
+  const aParts = outlineNumberParts(a.title);
+  const bParts = outlineNumberParts(b.title);
+  if (aParts.length && bParts.length) {
+    const length = Math.max(aParts.length, bParts.length);
+    for (let index = 0; index < length; index += 1) {
+      const diff = (aParts[index] ?? -1) - (bParts[index] ?? -1);
+      if (diff !== 0) {
+        return diff;
+      }
+    }
+  }
+  return a.page - b.page || a.level - b.level || a.title.localeCompare(b.title);
+}
+
+function mergedOutlineRows(...groups: OutlineRow[][]): OutlineRow[] {
+  const rows: OutlineRow[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const row of group) {
+      if (!row.title.trim() || row.source === "pending") {
+        continue;
+      }
+      const key = outlineCanonicalKey(row.title);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      rows.push(row);
+    }
+  }
+  return rows
+    .sort(compareOutlineRows)
+    .slice(0, 120);
+}
+
+function strictNumberedOutlineRows(rows: OutlineRow[]) {
+  const seen = new Set<string>();
+  return rows
+    .map((row) => {
+      const title = cleanStrictNumberedOutlineTitle(row.title);
+      return title ? { ...row, title, level: outlineLevelFromTitle(title) } : null;
+    })
+    .filter((row): row is OutlineRow => row !== null)
+    .sort(compareOutlineRows)
+    .filter((row) => {
+      const key = outlineCanonicalKey(row.title);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 120);
+}
+
 function readerOutlineRows(
   results: AiResultRecord[],
   pdfRows: OutlineRow[],
@@ -2185,11 +2648,17 @@ function readerOutlineRows(
   anchors: OutlineAnchor[],
   ui: UiStrings = uiStrings.ko,
 ): OutlineRow[] {
-  void pdfRows;
-  void anchors;
-  const aiRows = parseAiOutlineRows(results, pages);
+  const aiRows = strictNumberedOutlineRows(parseAiOutlineRows(results, pages));
   if (aiRows.length > 0) {
     return aiRows;
+  }
+  const pdfNumberedRows = strictNumberedOutlineRows(pdfRows);
+  if (pdfNumberedRows.length > 0) {
+    return pdfNumberedRows;
+  }
+  const detectedRows = strictNumberedOutlineRows(outlineRowsFromAnchors(anchors));
+  if (detectedRows.length > 0) {
+    return detectedRows;
   }
   if (hasFreshPendingOutlineResult(results)) {
     return [
@@ -2202,7 +2671,7 @@ function readerOutlineRows(
       },
     ];
   }
-  return fallbackOutlineRows([], pages);
+  return [];
 }
 
 function parseTranslationLines(outputText: string, expectedCount: number): string[] {
@@ -2242,7 +2711,7 @@ function parseTranslationLines(outputText: string, expectedCount: number): strin
   }
   const lines = readable
     .split(/\n+/)
-    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
     .filter((line) => line && !/^translation task queued/i.test(line) && !/^source text:/i.test(line));
   if (lines.length >= Math.min(2, expectedCount)) {
     return lines;
@@ -2329,12 +2798,12 @@ function parseTranslationPairs(outputText: string): TranslationPair[] {
       if (!line) {
         continue;
       }
-      const sourceMatch = line.match(/^(?:source|original|원문)\s*[:：]\s*(.+)$/i);
+      const sourceMatch = line.match(/^(?:source|original)\s*[:>\-]\s*(.+)$/i);
       if (sourceMatch) {
         pendingSource = sourceMatch[1].trim();
         continue;
       }
-      const translationMatch = line.match(/^(?:translation|translated|번역|번역문)\s*[:：]\s*(.+)$/i);
+      const translationMatch = line.match(/^(?:translation|translated)\s*[:>\-]\s*(.+)$/i);
       if (translationMatch) {
         pairs.push({ sourceIds: [], source: pendingSource, translation: translationMatch[1].trim() });
         pendingSource = "";
@@ -2370,7 +2839,7 @@ function parseTranslationMap(outputText: string): Map<string, string> {
     }
   } catch {
     for (const line of readable.split(/\n+/)) {
-      const match = line.match(/^\s*([A-Za-z0-9_-]+)\s*[:：-]\s*(.+)$/);
+      const match = line.match(/^\s*([A-Za-z0-9_-]+)\s*[:>\-]\s*(.+)$/);
       if (match) {
         map.set(match[1], match[2].trim());
       }
@@ -2381,17 +2850,18 @@ function parseTranslationMap(outputText: string): Map<string, string> {
 
 function colorForHighlightTag(tag: string) {
   const normalized = tag.toLowerCase();
-  if (/method|방법|algorithm|모델|실험/.test(normalized)) {
+  if (/method|algorithm|model|experiment/.test(normalized)) {
     return "#b8e986";
   }
-  if (/result|결과|성능|평가/.test(normalized)) {
+  if (/result|performance|evaluation|score/.test(normalized)) {
     return "#ff7f6e";
   }
-  if (/limit|한계|문제|error|오류/.test(normalized)) {
+  if (/limit|limitation|problem|error|failure/.test(normalized)) {
     return "#f6c85f";
   }
   return "#4ecdc4";
 }
+
 
 function parseAutoHighlightCandidates(outputText: string, fallbackPage: number): AutoHighlightCandidate[] {
   const readable = stripJsonFence(cleanAiOutput(outputText));
@@ -2426,7 +2896,7 @@ function parseAutoHighlightCandidates(outputText: string, fallbackPage: number):
   } catch {
     return readable
       .split(/\n+/)
-      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+      .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
       .filter((line) => line.length > 12)
       .slice(0, 6)
       .map((line) => ({
@@ -2436,6 +2906,835 @@ function parseAutoHighlightCandidates(outputText: string, fallbackPage: number):
         reason: "",
       }));
   }
+}
+
+const wordStopWords = new Set([
+  "about",
+  "above",
+  "after",
+  "again",
+  "against",
+  "also",
+  "although",
+  "among",
+  "because",
+  "before",
+  "between",
+  "both",
+  "could",
+  "does",
+  "doing",
+  "done",
+  "each",
+  "from",
+  "have",
+  "having",
+  "into",
+  "more",
+  "most",
+  "other",
+  "over",
+  "paper",
+  "same",
+  "some",
+  "than",
+  "that",
+  "their",
+  "there",
+  "these",
+  "this",
+  "those",
+  "through",
+  "under",
+  "using",
+  "were",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would",
+]);
+
+const phraseConnectorWords = new Set(["and", "as", "by", "for", "from", "in", "of", "on", "to", "via", "with"]);
+const technicalSuffixPattern = /(ability|able|al|ance|ence|ation|ative|ator|ence|ency|ent|graph|hood|ibility|ible|ical|ics|ing|ion|ism|ity|ive|ization|ized|izer|less|ment|ness|ology|ous|ship|tion|ty)$/;
+const technicalPrefixPattern = /^(amort|auto|bio|chrono|co|cross|de|dis|embedding|graph|hyper|inter|intra|latent|meta|micro|multi|neural|non|post|pre|pseudo|re|self|semi|sub|super|trans|un|zero)/;
+const basicKoreanDictionary: Record<string, string> = {
+  accuracy: "\uc815\ud655\ub3c4",
+  algorithm: "\uc54c\uace0\ub9ac\uc998",
+  analysis: "\ubd84\uc11d",
+  answer: "\ub2f5",
+  approach: "\uc811\uadfc\ubc95",
+  architecture: "\uad6c\uc870",
+  attention: "\uc5b4\ud150\uc158",
+  baseline: "\uae30\uc900 \ubaa8\ub378",
+  benchmark: "\ubca4\uce58\ub9c8\ud06c",
+  classification: "\ubd84\ub958",
+  context: "\ub9e5\ub77d",
+  data: "\ub370\uc774\ud130",
+  dataset: "\ub370\uc774\ud130\uc14b",
+  depth: "\uae4a\uc774",
+  difficulty: "\ub09c\uc774\ub3c4",
+  document: "\ubb38\uc11c",
+  dynamics: "\ub3d9\uc5ed\ud559",
+  error: "\uc624\ub958",
+  evaluation: "\ud3c9\uac00",
+  experiment: "\uc2e4\ud5d8",
+  feature: "\ud2b9\uc9d5",
+  framework: "\ud504\ub808\uc784\uc6cc\ud06c",
+  inference: "\ucd94\ub860",
+  input: "\uc785\ub825",
+  interplay: "\uc0c1\ud638\uc791\uc6a9",
+  known: "\uc54c\ub824\uc9c4",
+  language: "\uc5b8\uc5b4",
+  learning: "\ud559\uc2b5",
+  method: "\ubc29\ubc95",
+  minimalist: "\ubbf8\ub2c8\uba40\ud55c",
+  model: "\ubaa8\ub378",
+  network: "\ub124\ud2b8\uc6cc\ud06c",
+  optimization: "\ucd5c\uc801\ud654",
+  optimizer: "\ucd5c\uc801\ud654 \uc54c\uace0\ub9ac\uc998",
+  output: "\ucd9c\ub825",
+  paper: "\ub17c\ubb38",
+  parameter: "\ub9e4\uac1c\ubcc0\uc218",
+  performance: "\uc131\ub2a5",
+  prediction: "\uc608\uce21",
+  prompt: "\ud504\ub86c\ud504\ud2b8",
+  result: "\uacb0\uacfc",
+  reward: "\ubcf4\uc0c1",
+  sample: "\uc0d8\ud50c",
+  search: "\uac80\uc0c9",
+  sentence: "\ubb38\uc7a5",
+  sharpness: "\ub0a0\uce74\ub85c\uc6c0",
+  signal: "\uc2e0\ud638",
+  stability: "\uc548\uc815\uc131",
+  stabilization: "\uc548\uc815\ud654",
+  stochasticity: "\ud655\ub960\uc131",
+  system: "\uc2dc\uc2a4\ud15c",
+  task: "\uacfc\uc81c",
+  token: "\ud1a0\ud070",
+  training: "\ud559\uc2b5",
+  transformer: "\ud2b8\ub79c\uc2a4\ud3ec\uba38",
+  variable: "\ubcc0\uc218",
+};
+
+
+function basicDictionaryMeaning(term: string) {
+  const key = normalizeWordKey(term);
+  if (basicKoreanDictionary[key]) {
+    return basicKoreanDictionary[key];
+  }
+  const singular =
+    key.endsWith("ies") && key.length > 4
+      ? `${key.slice(0, -3)}y`
+      : key.endsWith("es") && key.length > 4
+        ? key.slice(0, -2)
+        : key.endsWith("s") && key.length > 3
+          ? key.slice(0, -1)
+          : "";
+  return singular ? basicKoreanDictionary[singular] ?? "" : "";
+}
+
+function onlineDictionaryCacheFromSettings(settings: Record<string, string>): OnlineDictionaryCache {
+  try {
+    const parsed = JSON.parse(settings[onlineDictionaryCacheSettingKey] || "{}") as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    const cache: OnlineDictionaryCache = {};
+    for (const [rawKey, rawValue] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = normalizeWordKey(rawKey);
+      if (!key || !rawValue || typeof rawValue !== "object") {
+        continue;
+      }
+      const record = rawValue as Record<string, unknown>;
+      cache[key] = {
+        meaning: String(record.meaning ?? ""),
+        source: String(record.source ?? "WiktApi/Wiktionary"),
+        fetchedAt: String(record.fetchedAt ?? nowIso()),
+        parserVersion: typeof record.parserVersion === "string" ? record.parserVersion : undefined,
+      };
+    }
+    return cache;
+  } catch {
+    return {};
+  }
+}
+
+function documentWordListSettingKey(documentId: string) {
+  return `${documentWordListSettingPrefix}${documentId}`;
+}
+
+function normalizeWordKey(value: string) {
+  return value
+    .replace(/\u2019/g, "'")
+    .replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function isMeaningfulEnglishWord(value: string) {
+  const word = normalizeWordKey(value);
+  if (word.length < 3 || wordStopWords.has(word)) {
+    return false;
+  }
+  if (!/^[a-z][a-z'-]*[a-z]$|^[a-z]{3,}$/.test(word)) {
+    return false;
+  }
+  return !/^(?:[a-z])$/.test(word);
+}
+
+function isPhraseConnector(word: string) {
+  return phraseConnectorWords.has(normalizeWordKey(word));
+}
+
+function isMeaningfulEnglishTerm(value: string) {
+  const term = normalizeWordKey(value);
+  if (!term) {
+    return false;
+  }
+  if (!term.includes(" ")) {
+    return isMeaningfulEnglishWord(term);
+  }
+  return false;
+}
+
+function cleanDictionaryMeaning(value: string) {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/^[-,;:(){}\[\]\s]+|[-,;:(){}\[\]\s]+$/g, "")
+    .trim();
+}
+
+function hasKoreanText(value: string) {
+  return /[\uac00-\ud7a3]/.test(value);
+}
+
+function koreanDictionaryMeaningParts(value: string) {
+  const cleaned = cleanDictionaryMeaning(value).replace(/[A-Za-z\u00c0-\u024f\u1d00-\u1d7f\u0250-\u02af]+/g, " ");
+  return cleaned
+    .split(/[,;\/|]+/)
+    .map((part) =>
+      part
+        .replace(/[^\uac00-\ud7a3\s-]/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/^-+|-+$/g, "")
+        .trim(),
+    )
+    .filter((part) => hasKoreanText(part) && part.length <= 40);
+}
+
+function normalizeKoreanDictionaryMeaning(value: string) {
+  return [...new Set(koreanDictionaryMeaningParts(value))].slice(0, 6).join(", ");
+}
+
+function normalizeOnlineDictionaryMeaning(value: string) {
+  return normalizeKoreanDictionaryMeaning(value);
+}
+
+function addKoreanDictionaryMeaning(value: string, output: Set<string>, record?: Record<string, unknown>) {
+  if (record && isNoisyDictionaryRecord(record)) {
+    return;
+  }
+  for (const meaning of koreanDictionaryMeaningParts(value)) {
+    output.add(meaning);
+  }
+}
+
+function isCurrentDictionaryEntry(entry: WordMeaningEntry) {
+  return entry.source !== "dictionary" || entry.context === onlineDictionarySourceLabel;
+}
+
+function hasUsableWordMeaning(entries: WordMeaningEntry[] | undefined) {
+  return Boolean(
+    entries?.some((entry) =>
+      entry.source === "dictionary"
+        ? isCurrentDictionaryEntry(entry) && Boolean(normalizeOnlineDictionaryMeaning(entry.meaning))
+        : Boolean(entry.meaning.trim()),
+    ),
+  );
+}
+
+function displayWordMeaning(entry: WordMeaningEntry) {
+  return entry.source === "dictionary" ? normalizeOnlineDictionaryMeaning(entry.meaning) : entry.meaning.trim();
+}
+
+function displayWordMeaningEntries(entries: WordMeaningEntry[]) {
+  return entries
+    .filter(isCurrentDictionaryEntry)
+    .map((entry) => ({ ...entry, meaning: displayWordMeaning(entry) }))
+    .filter((entry) => entry.meaning.length > 0);
+}
+
+function dictionaryRecordText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map(dictionaryRecordText).join(" ");
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return "";
+}
+
+function isNoisyDictionaryRecord(record: Record<string, unknown>) {
+  const tagText = [
+    record.tags,
+    record.raw_tags,
+    record.topics,
+    record.qualifier,
+    record.qualifiers,
+    record.note,
+    record.notes,
+    record.usage,
+  ]
+    .map(dictionaryRecordText)
+    .join(" ")
+    .toLowerCase();
+  return /north korea|north korean|dprk|archaic|obsolete|rare|dialect|dialectal|nonstandard|misspelling|romanization|pronunciation/.test(tagText);
+}
+
+
+function isKoreanDictionaryRecord(record: Record<string, unknown>) {
+  const langCode = String(record.lang_code ?? record.code ?? record.langCode ?? "").toLowerCase();
+  const lang = String(record.lang ?? record.language ?? record.name ?? "").toLowerCase();
+  const nestedLanguage = record.language && typeof record.language === "object" ? (record.language as Record<string, unknown>) : null;
+  const nestedCode = String(nestedLanguage?.code ?? "").toLowerCase();
+  const nestedName = String(nestedLanguage?.name ?? "").toLowerCase();
+  return (
+    langCode === "ko" ||
+    nestedCode === "ko" ||
+    lang === "korean" ||
+    lang === "\ud55c\uad6d\uc5b4" ||
+    lang.includes("korean") ||
+    nestedName === "korean" ||
+    nestedName === "\ud55c\uad6d\uc5b4" ||
+    nestedName.includes("korean")
+  );
+}
+
+function collectKoreanDictionaryValues(value: unknown, output: Set<string>, depth = 0, inTranslations = false) {
+  if (depth > 8 || value === null || value === undefined) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectKoreanDictionaryValues(item, output, depth + 1, inTranslations);
+    }
+    return;
+  }
+  if (typeof value !== "object") {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  if (inTranslations && isKoreanDictionaryRecord(record) && !isNoisyDictionaryRecord(record)) {
+    for (const field of ["word", "translation", "text", "term", "trans_word"]) {
+      const raw = record[field];
+      if (typeof raw === "string") {
+        addKoreanDictionaryMeaning(raw, output, record);
+      }
+    }
+    return;
+  }
+  for (const [key, nested] of Object.entries(record)) {
+    if (["forms", "sounds", "pronunciations", "hyphenation", "synonyms", "antonyms", "derived", "related"].includes(key)) {
+      continue;
+    }
+    collectKoreanDictionaryValues(nested, output, depth + 1, inTranslations || key === "translations");
+  }
+}
+
+function parseOnlineDictionaryMeaning(payload: unknown, rootIsTranslations = false) {
+  const values = new Set<string>();
+  collectKoreanDictionaryValues(payload, values, 0, rootIsTranslations);
+  return [...values]
+    .filter((item) => item.length > 0 && item.length <= 80)
+    .slice(0, 6)
+    .join(", ");
+}
+
+function parseMachineTranslatedKoreanMeaning(payload: unknown) {
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string") {
+      for (const meaning of koreanDictionaryMeaningParts(value)) {
+        values.add(meaning);
+      }
+    }
+  };
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    const responseData = record.responseData && typeof record.responseData === "object" ? (record.responseData as Record<string, unknown>) : null;
+    add(responseData?.translatedText);
+    if (Array.isArray(record.matches)) {
+      for (const match of record.matches) {
+        if (match && typeof match === "object") {
+          add((match as Record<string, unknown>).translation);
+        }
+      }
+    }
+  }
+  return [...values]
+    .filter((item) => item.length > 0 && item.length <= 80)
+    .slice(0, 4)
+    .join(", ");
+}
+
+function dictionaryLookupCandidates(term: string) {
+  const key = normalizeWordKey(term);
+  const candidates = new Set<string>(key && !key.includes(" ") ? [key] : []);
+  const add = (candidate: string) => {
+    const normalized = normalizeWordKey(candidate);
+    if (normalized && normalized.length >= 3 && !normalized.includes(" ")) {
+      candidates.add(normalized);
+    }
+  };
+  if (key.endsWith("ies") && key.length > 4) {
+    add(`${key.slice(0, -3)}y`);
+  }
+  if (key.endsWith("ves") && key.length > 4) {
+    add(`${key.slice(0, -3)}f`);
+    add(`${key.slice(0, -3)}fe`);
+  }
+  if (/(?:ches|shes|xes|zes|ses|oes)$/.test(key) && key.length > 4) {
+    add(key.slice(0, -2));
+  }
+  if (key.endsWith("s") && key.length > 4 && !/(?:ss|us|is)$/.test(key)) {
+    add(key.slice(0, -1));
+  }
+  if (key.endsWith("ing") && key.length > 5) {
+    const stem = key.slice(0, -3);
+    add(stem);
+    add(`${stem}e`);
+    if (/([b-df-hj-np-tv-z])\1$/.test(stem)) {
+      add(stem.slice(0, -1));
+    }
+  }
+  if (key.endsWith("ied") && key.length > 4) {
+    add(`${key.slice(0, -3)}y`);
+  }
+  if (key.endsWith("ed") && key.length > 4) {
+    const stem = key.slice(0, -2);
+    add(stem);
+    add(`${stem}e`);
+    if (/([b-df-hj-np-tv-z])\1$/.test(stem)) {
+      add(stem.slice(0, -1));
+    }
+  }
+  return [...candidates].filter(isMeaningfulEnglishWord);
+}
+
+async function fetchOnlineDictionaryMeaningForKey(key: string): Promise<string> {
+  const encoded = encodeURIComponent(key);
+  const endpoints = [
+    { url: `https://api.wiktapi.dev/v1/en/word/${encoded}/translations?lang=ko`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: true },
+    { url: `https://api.wiktapi.dev/v1/en/word/${encoded}/translations`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: true },
+    { url: `https://freedictionaryapi.com/api/v1/entries/en/${encoded}?translations=true`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: false },
+    { url: `https://api.mymemory.translated.net/get?q=${encoded}&langpair=en%7Cko&mt=1`, parser: parseMachineTranslatedKoreanMeaning, rootIsTranslations: false },
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint.url);
+      if (!response.ok) {
+        continue;
+      }
+      const payload = (await response.json()) as unknown;
+      const meaning = endpoint.parser(payload, endpoint.rootIsTranslations);
+      if (meaning) {
+        return meaning;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return "";
+}
+
+async function fetchOnlineDictionaryMeaning(term: string): Promise<string> {
+  for (const candidate of dictionaryLookupCandidates(term)) {
+    const meaning = await fetchOnlineDictionaryMeaningForKey(candidate);
+    if (meaning) {
+      return meaning;
+    }
+  }
+  return "";
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function proseForTermExtraction(text: string) {
+  return text
+    .replace(/\$[\s\S]*?\$/g, " ")
+    .replace(/\\\([^)]+\\\)|\\\[[^\]]+\\\]/g, " ")
+    .replace(/\b[a-z]\s*(?:[=+\-*/^<>]\s*[a-z0-9])+\b/gi, " ")
+    .replace(/\b(?:argmax|argmin|cos|exp|lim|log|max|min|sin|sqrt|tan)\b/gi, " ");
+}
+
+function termTokens(sentence: string) {
+  return [...sentence.matchAll(/[A-Za-z](?:[A-Za-z'-]*[A-Za-z])?/g)]
+    .map((match) => {
+      const raw = match[0];
+      const key = normalizeWordKey(raw);
+      return {
+        raw,
+        key,
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + raw.length,
+        content: isMeaningfulEnglishWord(key),
+        connector: isPhraseConnector(key),
+        acronym: /^[A-Z]{2,}$/.test(raw),
+        capitalized: /^[A-Z][a-z]/.test(raw),
+      };
+    })
+    .filter((token) => token.key.length > 0);
+}
+
+function isTechnicalWord(word: string) {
+  const key = normalizeWordKey(word);
+  return (
+    key.length >= 9 ||
+    key.includes("-") ||
+    technicalSuffixPattern.test(key) ||
+    technicalPrefixPattern.test(key)
+  );
+}
+
+function termCandidateScore(term: string, kind: "word" | "phrase", count: number, examples: string[], titleText: string) {
+  const key = normalizeWordKey(term);
+  const parts = key.split(" ");
+  const inTitle = titleText.includes(key);
+  const hasAcronym = examples.some((example) => new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(example) && /\b[A-Z]{2,}\b/.test(example));
+  const hasHyphen = key.includes("-");
+  const technicalParts = parts.filter((part) => isTechnicalWord(part));
+  let score = Math.min(18, count * (kind === "phrase" ? 3 : 1.6));
+  if (kind === "phrase") score += 14 + Math.min(8, parts.length * 2);
+  if (inTitle) score += 8;
+  if (hasAcronym) score += 6;
+  if (hasHyphen) score += 4;
+  score += Math.min(10, technicalParts.length * 3);
+  if (basicDictionaryMeaning(key) && kind === "word") score -= 10;
+  const contextNeeded =
+    kind === "phrase" ||
+    inTitle ||
+    hasAcronym ||
+    hasHyphen ||
+    (kind === "word" && !basicDictionaryMeaning(key) && (technicalParts.length > 0 || key.length >= 8 || (count >= 4 && key.length >= 6)));
+  const reason = [
+    kind === "phrase" ? "phrase" : "word",
+    count > 1 ? `freq:${count}` : "",
+    inTitle ? "title" : "",
+    hasAcronym ? "acronym" : "",
+    hasHyphen ? "hyphen" : "",
+    technicalParts.length ? "technical" : "",
+    basicDictionaryMeaning(key) && kind === "word" ? "basic-dict" : "",
+  ]
+    .filter(Boolean)
+    .join(",");
+  return { score, contextNeeded, reason };
+}
+
+function addTermCandidate(
+  map: Map<string, { term: string; kind: "word" | "phrase"; count: number; first: number; examples: string[] }>,
+  term: string,
+  kind: "word" | "phrase",
+  first: number,
+  example: string,
+) {
+  const key = normalizeWordKey(term);
+  if (!isMeaningfulEnglishTerm(key)) {
+    return;
+  }
+  const existing = map.get(key);
+  if (existing) {
+    existing.count += 1;
+    if (existing.examples.length < 3 && example && !existing.examples.includes(example)) {
+      existing.examples.push(example);
+    }
+    return;
+  }
+  map.set(key, {
+    term: key,
+    kind,
+    count: 1,
+    first,
+    examples: example ? [example] : [],
+  });
+}
+
+function extractDocumentTermCandidates(pages: PageRecord[], document: DocumentRecord | null = null, limit = 5000): DocumentTermCandidate[] {
+  const prose = proseForTermExtraction(pages.map((page) => page.text).join("\n\n"));
+  const titleText = normalizeForMatch(`${document?.title ?? ""} ${document?.abstractText ?? ""}`);
+  const counts = new Map<string, { display: string; count: number; first: number }>();
+  for (const match of prose.matchAll(/[A-Za-z](?:[A-Za-z'-]*[A-Za-z])?/g)) {
+    const raw = match[0];
+    const key = normalizeWordKey(raw);
+    if (!isMeaningfulEnglishWord(key)) {
+      continue;
+    }
+    const existing = counts.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      counts.set(key, {
+        display: raw,
+        count: 1,
+        first: match.index ?? 0,
+      });
+    }
+  }
+  const candidates = new Map<string, { term: string; kind: "word" | "phrase"; count: number; first: number; examples: string[] }>();
+  for (const [word, value] of counts.entries()) {
+    addTermCandidate(candidates, word, "word", value.first, "");
+  }
+  return [...candidates.values()]
+    .map((candidate) => {
+      const scored = termCandidateScore(candidate.term, candidate.kind, candidate.count, candidate.examples, titleText);
+      return {
+        term: candidate.term,
+        kind: candidate.kind,
+        count: candidate.count,
+        score: scored.score,
+        contextNeeded: scored.contextNeeded,
+        reason: scored.reason,
+        examples: candidate.examples,
+      };
+    })
+    .filter((candidate) => candidate.kind === "word" || candidate.count > 1 || candidate.score >= 18)
+    .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term))
+    .slice(0, limit);
+}
+
+function extractEnglishWordsFromPages(pages: PageRecord[], limit = 5000) {
+  return extractDocumentTermCandidates(pages, null, limit).map((candidate) => candidate.term);
+}
+
+function parseStoredWordList(settings: Record<string, string>, documentId: string) {
+  try {
+    const value = settings[documentWordListSettingKey(documentId)];
+    const parsed = value ? (JSON.parse(value) as unknown) : [];
+    const rows =
+      Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as { terms?: unknown }).terms)
+          ? (parsed as { terms: unknown[] }).terms
+          : [];
+    return rows.map((word) => normalizeWordKey(String(word))).filter(isMeaningfulEnglishTerm);
+  } catch {
+    return [];
+  }
+}
+
+function wordMeaningMapFromSettings(settings: Record<string, string>): WordMeaningMap {
+  try {
+    const parsed = JSON.parse(settings[wordMeaningMapSettingKey] || "{}") as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    const next: WordMeaningMap = {};
+    for (const [rawKey, rawEntries] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = normalizeWordKey(rawKey);
+      if (!key || !Array.isArray(rawEntries)) {
+        continue;
+      }
+      const entries = rawEntries
+        .map((entry): WordMeaningEntry | null => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+          const record = entry as Record<string, unknown>;
+          const word = normalizeWordKey(String(record.word ?? key));
+          const meaning = String(record.meaning ?? "").trim();
+          if (!word || !meaning) {
+            return null;
+          }
+          return {
+            id: String(record.id ?? makeId("wm")),
+            word,
+            meaning,
+            documentId: String(record.documentId ?? ""),
+            documentTitle: String(record.documentTitle ?? ""),
+            context: String(record.context ?? ""),
+            createdAt: String(record.createdAt ?? nowIso()),
+            source: record.source === "local" ? "local" : record.source === "dictionary" ? "dictionary" : "ai",
+          };
+        })
+        .filter((entry): entry is WordMeaningEntry => entry !== null);
+      if (entries.length > 0) {
+        next[key] = entries;
+      }
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+function parsedWordMeaningFromRecord(record: Record<string, unknown>, fallbackWord = ""): ParsedWordMeaning | null {
+  const word = normalizeWordKey(String(record.word ?? record.term ?? record.english ?? fallbackWord));
+  const meaning = String(record.meaning ?? record.korean ?? record.translation ?? record.definition ?? "").trim();
+  const context = String(record.context ?? record.reason ?? record.note ?? "").trim();
+  if (!word || !meaning) {
+    return null;
+  }
+  return { word, meaning, context };
+}
+
+function parseWordMeaningItems(outputText: string, fallbackWords: string[] = []): ParsedWordMeaning[] {
+  const readable = stripJsonFence(cleanAiOutput(outputText));
+  if (!readable) {
+    return [];
+  }
+  const candidates = [readable];
+  const jsonMatch = readable.match(/(?:\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonMatch && jsonMatch[0] !== readable) {
+    candidates.push(jsonMatch[0]);
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = parseAiJson(candidate);
+      const rows =
+        Array.isArray(parsed)
+          ? parsed
+          : parsed && typeof parsed === "object" && Array.isArray((parsed as { meanings?: unknown }).meanings)
+            ? (parsed as { meanings: unknown[] }).meanings
+            : parsed && typeof parsed === "object"
+              ? Object.entries(parsed as Record<string, unknown>).map(([word, value]) =>
+                  typeof value === "object" && value !== null
+                    ? { word, ...(value as Record<string, unknown>) }
+                    : { word, meaning: String(value ?? "") },
+                )
+              : [];
+      const parsedRows = rows
+        .map((row, index) =>
+          row && typeof row === "object"
+            ? parsedWordMeaningFromRecord(row as Record<string, unknown>, fallbackWords[index])
+            : null,
+        )
+        .filter((row): row is ParsedWordMeaning => row !== null);
+      if (parsedRows.length > 0) {
+        return parsedRows;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return readable
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
+    .map((line): ParsedWordMeaning | null => {
+      const match = line.match(/^([A-Za-z][A-Za-z' -]{1,90})\s*(?:[:=\-]|->|=>)\s*(.+)$/);
+      if (!match) {
+        return null;
+      }
+      return {
+        word: normalizeWordKey(match[1]),
+        meaning: match[2].trim(),
+        context: "",
+      };
+    })
+    .filter((row): row is ParsedWordMeaning => row !== null);
+}
+
+function requestedWordMeaningTerms(result: AiResultRecord, fallbackWords: string[]) {
+  const terms = new Set(fallbackWords.map(normalizeWordKey).filter(Boolean));
+  const match = result.inputText.match(/^\[word meanings:\s*([^\]]+)\]/i);
+  if (match) {
+    for (const word of match[1].split(",")) {
+      const key = normalizeWordKey(word);
+      if (key && key !== "...") {
+        terms.add(key);
+      }
+    }
+  }
+  return terms;
+}
+
+function clickedWordFromText(raw: string, ratio: number) {
+  const matches = [...raw.matchAll(/[A-Za-z](?:[A-Za-z'-]*[A-Za-z])?/g)];
+  if (matches.length === 0) {
+    return "";
+  }
+  const charIndex = Math.max(0, Math.min(raw.length, Math.round(raw.length * ratio)));
+  const ranked = matches
+    .map((match) => {
+      const start = match.index ?? 0;
+      const end = start + match[0].length;
+      const distance = charIndex >= start && charIndex <= end ? 0 : Math.min(Math.abs(charIndex - start), Math.abs(charIndex - end));
+      return { word: match[0], distance };
+    })
+    .sort((a, b) => a.distance - b.distance);
+  const key = normalizeWordKey(ranked[0]?.word ?? "");
+  return isMeaningfulEnglishWord(key) ? key : "";
+}
+
+function clickedWordFromTextSpan(raw: string, ratio: number, combinedWord = "") {
+  const word = clickedWordFromText(raw, ratio);
+  const combined = normalizeWordKey(combinedWord);
+  if (!word || !combined) {
+    return word;
+  }
+  const trimmed = raw.trim();
+  const prefix = normalizeWordKey(trimmed.match(/([A-Za-z][A-Za-z']*)-\s*$/)?.[1] ?? "");
+  const suffix = normalizeWordKey(trimmed.match(/^([A-Za-z][A-Za-z']*)/)?.[1] ?? "");
+  if ((prefix && word === prefix && combined.startsWith(prefix)) || (suffix && word === suffix && combined.endsWith(suffix))) {
+    return combined;
+  }
+  return word;
+}
+
+function annotateHyphenatedTextSpans(layer: HTMLElement) {
+  const spans = Array.from(layer.querySelectorAll<HTMLElement>("[data-text]"));
+  for (const span of spans) {
+    span.dataset.combinedWord = "";
+  }
+  const orderedSpans = spans.filter((span) => (span.dataset.text ?? "").trim());
+  for (let index = 0; index < orderedSpans.length - 1; index += 1) {
+    const current = orderedSpans[index];
+    const next = orderedSpans[index + 1];
+    const prefix = (current.dataset.text ?? "").trim().match(/([A-Za-z][A-Za-z']*)-\s*$/)?.[1] ?? "";
+    const suffix = (next.dataset.text ?? "").trim().match(/^([A-Za-z][A-Za-z']*)/)?.[1] ?? "";
+    const combined = normalizeWordKey(`${prefix}${suffix}`);
+    if (prefix && suffix && isMeaningfulEnglishWord(combined)) {
+      current.dataset.combinedWord = combined;
+      next.dataset.combinedWord = combined;
+    }
+  }
+}
+
+function bestTermForWordPopup(popup: WordPopup, knownTerms: string[], meaningMap: WordMeaningMap) {
+  const word = normalizeWordKey(popup.word);
+  if (!word) {
+    return "";
+  }
+  const candidates = dictionaryLookupCandidates(word);
+  const known = new Set(knownTerms.map(normalizeWordKey).filter(Boolean));
+  for (const candidate of candidates) {
+    if (hasUsableWordMeaning(meaningMap[candidate])) {
+      return candidate;
+    }
+  }
+  for (const candidate of candidates) {
+    if (known.has(candidate)) {
+      return candidate;
+    }
+  }
+  for (const candidate of candidates) {
+    if (basicDictionaryMeaning(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[0] ?? word;
 }
 
 const translationInputMarkerPattern = /^\[translation:\s*([^\]]+)\]\n/i;
@@ -2827,25 +4126,19 @@ function textBoxesFromPdfItems(
   scale: number,
 ) {
   const util = (pdfjsLib as unknown as { Util: { transform: (a: number[], b: number[]) => number[] } }).Util;
-  const text = items.map((item) => item.str ?? "").join(" ");
   const boxes: TextLayerBox[] = [];
-  let textCursor = 0;
   for (const item of items) {
     const raw = (item.str ?? "").trim();
     if (!raw) {
       continue;
     }
-    const itemIndex = text.indexOf(raw, textCursor);
-    const itemStart = itemIndex >= 0 ? itemIndex : textCursor;
-    const itemEnd = itemStart + raw.length;
-    textCursor = itemEnd;
     const transform = item.transform ? util.transform(viewport.transform, item.transform) : [1, 0, 0, 1, 0, 0];
     const fontHeight = Math.max(8, Math.hypot(transform[2], transform[3]));
     const fallbackWidth = Math.max(8, raw.length * fontHeight * 0.52);
     boxes.push({
       text: raw,
-      start: itemStart,
-      end: itemEnd,
+      start: 0,
+      end: 0,
       rect: {
         left: transform[4],
         top: transform[5] - fontHeight,
@@ -2856,7 +4149,7 @@ function textBoxesFromPdfItems(
       fontName: item.fontName ?? "",
     });
   }
-  return { text, boxes };
+  return textAndBoxesFromOrderedLines(textLinesFromBoxes(boxes));
 }
 
 function flexibleTextPattern(value: string) {
@@ -3533,7 +4826,7 @@ function findReferenceTargetByPatterns(
         if (pattern.preferReferences && referenceStart !== null && page.pageNumber >= referenceStart) {
           score += 12;
         }
-        if (pattern.preferMath && /[=+\-*/^_{}<>]|\\sum|\\int|∑|∫|√|≤|≥|≈|α|β|γ|θ|λ|μ|σ/i.test(windowText)) {
+        if (pattern.preferMath && /[=+\-*/^_{}<>]|\\sum|\\int|\\prod|\\lim/i.test(windowText)) {
           score += 10;
         }
         if (/[.:]\s+[A-Z0-9]/.test(windowText.slice(Math.max(0, match[0].length - 3), match[0].length + 8))) {
@@ -4146,11 +5439,13 @@ function App() {
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [selectionToolbar, setSelectionToolbar] = useState<SelectionToolbar | null>(null);
+  const [wordPopup, setWordPopup] = useState<WordPopup | null>(null);
+  const [wordLookupLoadingKey, setWordLookupLoadingKey] = useState<string | null>(null);
   const [hoverSource, setHoverSource] = useState<string | null>(null);
   const [chatDraft, setChatDraft] = useState("");
   const [outlineCompact, setOutlineCompact] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(true);
-  const [autoHighlightMenuOpen, setAutoHighlightMenuOpen] = useState(false);
+  const [markupTool, setMarkupTool] = useState<ReaderMarkupTool>({ kind: "none" });
   const [assistantMode, setAssistantMode] = useState<ReaderAssistantMode>("study");
   const [floatingResultId, setFloatingResultId] = useState<string | null>(null);
   const [linkPreview, setLinkPreview] = useState<LinkPreviewState | null>(null);
@@ -4158,7 +5453,7 @@ function App() {
   const [selectedSentenceId, setSelectedSentenceId] = useState<string | null>(null);
   const [translationEligiblePages, setTranslationEligiblePages] = useState<Set<number>>(() => new Set([1]));
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [translationPanelOpen, setTranslationPanelOpen] = useState(true);
+  const [translationPanelOpen, setTranslationPanelOpen] = useState(false);
   const [layoutOverride, setLayoutOverride] = useState<Partial<Record<LayoutPane, number>>>({});
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<Partial<Record<AiProviderKind, AgentProviderStatus>>>({});
@@ -4217,6 +5512,18 @@ function App() {
   const currentPage = useMemo(
     () => activePages.find((page) => page.pageNumber === pageCursor),
     [activePages, pageCursor],
+  );
+  const wordMeaningMap = useMemo(() => wordMeaningMapFromSettings(state.settings), [state.settings]);
+  const activeDocumentWordList = useMemo(() => {
+    if (!activeDocument) {
+      return [];
+    }
+    const stored = parseStoredWordList(state.settings, activeDocument.id);
+    return stored.length ? stored : extractDocumentTermCandidates(activePages, activeDocument).map((candidate) => candidate.term);
+  }, [activeDocument, activePages, state.settings]);
+  const missingWordCount = useMemo(
+    () => activeDocumentWordList.filter((word) => !wordMeaningMap[normalizeWordKey(word)]?.length).length,
+    [activeDocumentWordList, wordMeaningMap],
   );
   const activeAnnotations = useMemo(
     () => state.annotations.filter((item) => item.documentId === activeDocumentId),
@@ -4325,6 +5632,12 @@ function App() {
         settings.language = settings.uiLanguage;
         settings.translationLanguage = translationLanguageOption(settings.translationLanguage).value;
         const normalizedProvider = normalizeAiProviderKind(settings.aiProvider);
+        settings.codexModel = settings.codexModel || (normalizedProvider === "codex-cli" ? settings.aiModel || "" : "");
+        settings.codexReasoningEffort = selectedCodexReasoningEffort(settings);
+        settings.claudeModel = settings.claudeModel || (normalizedProvider === "claude-code" ? settings.aiModel || "" : "");
+        settings.autoHighlight = "false";
+        settings.wordMeaningLookupEnabled = wordMeaningLookupEnabled(settings) ? "true" : "false";
+        settings.aiModel = selectedAiModel(settings);
         if (settings.aiProvider !== normalizedProvider) {
           settings.aiProvider = normalizedProvider;
           void setSetting("aiProvider", normalizedProvider).catch((error) => showToast(String(error), "error"));
@@ -4463,7 +5776,7 @@ function App() {
     event.stopPropagation();
     const startX = event.clientX;
     const startValue = readerLayout[pane];
-    const direction = pane === "outline" ? 1 : -1;
+    const direction = pane === "rightPanel" ? -1 : 1;
     let latest = startValue;
     const bounds = layoutBounds[pane];
     const handleMove = (moveEvent: PointerEvent) => {
@@ -4757,13 +6070,25 @@ function App() {
       }))
       .filter((rect) => rect.width > 2 && rect.height > 2);
     const rect = range.getBoundingClientRect();
-    setSelectionToolbar({
+    const toolbar = {
       text,
       page: Number(page.dataset.page ?? "1"),
       x: rect.left + rect.width / 2,
       y: Math.max(72, rect.top - 46),
       rects,
-    });
+    };
+    if (markupTool.kind === "erase") {
+      setSelectionToolbar(null);
+      selection.removeAllRanges();
+      return;
+    }
+    if (markupTool.kind === "highlight") {
+      setSelectionToolbar(null);
+      selection.removeAllRanges();
+      void createManualHighlightFromToolbar(toolbar, markupTool.color);
+      return;
+    }
+    setSelectionToolbar(toolbar);
   }
 
   function getCanvasPoint(event: React.MouseEvent) {
@@ -4864,7 +6189,7 @@ function App() {
         height: Math.round(drag.height),
       },
       imageDataUrl: canvasToCompressedImageDataUrl(crop),
-      text: regionPageText ? `선택 영역이 포함된 ${drag.page}쪽 주변 텍스트:\n${regionPageText}` : "",
+      text: regionPageText ? `Image region page ${drag.page} context:\n${regionPageText}` : "",
       pages: regionPage
         ? [
             {
@@ -4906,19 +6231,19 @@ function App() {
     }
   }
 
-  async function createManualHighlight(color: string, comment = "") {
-    if (!activeDocument || !selectionToolbar) {
+  async function createManualHighlightFromToolbar(toolbar: SelectionToolbar, color: string, comment = "") {
+    if (!activeDocument) {
       return;
     }
     const annotation: AnnotationRecord = {
       id: makeId("ann"),
       documentId: activeDocument.id,
-      page: selectionToolbar.page,
+      page: toolbar.page,
       kind: "manual",
       color,
-      text: selectionToolbar.text,
-      rangeHint: selectionToolbar.text.slice(0, 160),
-      rects: selectionToolbar.rects,
+      text: toolbar.text,
+      rangeHint: toolbar.text.slice(0, 160),
+      rects: toolbar.rects,
       comment,
       tag: "Manual",
       createdAt: nowIso(),
@@ -4941,6 +6266,13 @@ function App() {
       draft.annotations = [saved, ...draft.annotations.filter((item) => item.id !== saved.id)];
     });
     setSelectionToolbar(null);
+  }
+
+  async function createManualHighlight(color: string, comment = "") {
+    if (!selectionToolbar) {
+      return;
+    }
+    await createManualHighlightFromToolbar(selectionToolbar, color, comment);
   }
 
   async function addCommentFromSelection() {
@@ -4994,8 +6326,9 @@ function App() {
     const extracted: PageRecord[] = [];
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       const page = await pdfDocument.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: defaultReaderZoom });
       const content = await page.getTextContent();
-      const text = content.items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
+      const text = pageTextFromPdfItems(content.items, viewport, defaultReaderZoom);
       extracted.push({
         documentId: activeDocument.id,
         pageNumber,
@@ -5007,6 +6340,9 @@ function App() {
     patchState((draft) => {
       draft.pages = draft.pages.filter((page) => page.documentId !== activeDocument.id).concat(extracted);
     });
+    void persistWordListForPages(activeDocument.id, extracted).catch((error) =>
+      showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"),
+    );
     return extracted;
   }
 
@@ -5022,10 +6358,9 @@ function App() {
       return null;
     }
     try {
-      setAutoHighlightMenuOpen(false);
       const providerKind = normalizeAiProviderKind(state.settings.aiProvider);
       const needsPages =
-        ["summarizePaper", "chatWithPaper", "autoHighlight", "outlineDocument"].includes(taskType) ||
+        ["summarizePaper", "chatWithPaper", "autoHighlight", "outlineDocument", wordMeaningTaskType].includes(taskType) ||
         (taskType === "translatePage" && !payload.text);
       const payloadPages = Array.isArray(payload.pages) ? (payload.pages as PageRecord[]) : null;
       const pages = needsPages ? (payloadPages?.length ? payloadPages : await ensureActivePages()) : activePages;
@@ -5055,7 +6390,8 @@ function App() {
             documentContextPack: contextPack,
             customPrompt: state.settings.customPrompt,
             mathDelimiter: state.settings.mathDelimiter,
-            model: state.settings.aiModel || "",
+            model: selectedAiModel(state.settings),
+            reasoningEffort: providerKind === "codex-cli" ? selectedCodexReasoningEffort(state.settings) : "",
             providerSessionId,
           });
           patchState((draft) => {
@@ -5111,7 +6447,8 @@ function App() {
         ...taskPayload,
         customPrompt: state.settings.customPrompt,
         mathDelimiter: state.settings.mathDelimiter,
-        model: state.settings.aiModel || "",
+        model: selectedAiModel(state.settings),
+        reasoningEffort: providerKind === "codex-cli" ? selectedCodexReasoningEffort(state.settings) : "",
         providerSessionId,
       });
       patchState((draft) => {
@@ -5213,6 +6550,317 @@ function App() {
     patchState((draft) => {
       draft.aiResults = draft.aiResults.filter((result) => !idSet.has(result.id));
     });
+  }
+
+  async function persistWordListForPages(documentId: string, pages: PageRecord[]) {
+    const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
+    const candidates = extractDocumentTermCandidates(pages, document);
+    const terms = candidates.map((candidate) => candidate.term);
+    if (terms.length === 0) {
+      return terms;
+    }
+    const key = documentWordListSettingKey(documentId);
+    const value = JSON.stringify({
+      terms,
+      candidates: candidates.slice(0, 1500),
+    });
+    if (state.settings[key] === value) {
+      return terms;
+    }
+    patchState((draft) => {
+      draft.settings[key] = value;
+    });
+    await setSetting(key, value);
+    return terms;
+  }
+
+  async function saveWordMeaningsFromResult(result: AiResultRecord, fallbackWords: string[] = []) {
+    if (result.status === "failed" || result.taskType.toString() !== wordMeaningTaskType) {
+      return 0;
+    }
+    const requestedTerms = requestedWordMeaningTerms(result, fallbackWords);
+    const meanings = parseWordMeaningItems(result.outputText, fallbackWords)
+      .filter((item) => requestedTerms.size === 0 || requestedTerms.has(normalizeWordKey(item.word)))
+      .slice(0, wordMeaningBatchLimit);
+    if (meanings.length === 0) {
+      return 0;
+    }
+    const document = state.documents.find((item) => item.id === result.documentId) ?? activeDocument;
+    const nextMap = wordMeaningMapFromSettings(state.settings);
+    let added = 0;
+    for (const item of meanings) {
+      const key = normalizeWordKey(item.word);
+      const meaning = item.meaning.trim();
+      if (!key || !meaning) {
+        continue;
+      }
+      const entries = nextMap[key] ?? [];
+      const duplicate = entries.some(
+        (entry) =>
+          entry.documentId === result.documentId &&
+          normalizeComparable(entry.meaning) === normalizeComparable(meaning) &&
+          normalizeComparable(entry.context) === normalizeComparable(item.context),
+      );
+      if (duplicate) {
+        continue;
+      }
+      entries.push({
+        id: makeId("wm"),
+        word: key,
+        meaning,
+        documentId: result.documentId,
+        documentTitle: document?.title || document?.fileName || ui.untitledPaper,
+        context: item.context,
+        createdAt: nowIso(),
+        source: result.provider === "local-draft" ? "local" : "ai",
+      });
+      nextMap[key] = entries;
+      added += 1;
+    }
+    if (added === 0) {
+      return 0;
+    }
+    const value = JSON.stringify(nextMap);
+    patchState((draft) => {
+      draft.settings[wordMeaningMapSettingKey] = value;
+    });
+    await setSetting(wordMeaningMapSettingKey, value);
+    const requestedCount = requestedTerms.size || meanings.length;
+    const remaining = Math.max(0, requestedCount - added);
+    showToast(
+      uiLanguage === "ko"
+        ? `단어 뜻 저장: 요청 ${requestedCount}개 / 저장 ${added}개 / 남음 ${remaining}개`
+        : `Word meanings: requested ${requestedCount} / saved ${added} / remaining ${remaining}`,
+    );
+    return added;
+  }
+
+  async function persistWordMeaningMap(nextMap: WordMeaningMap) {
+    const value = JSON.stringify(nextMap);
+    patchState((draft) => {
+      draft.settings[wordMeaningMapSettingKey] = value;
+    });
+    await setSetting(wordMeaningMapSettingKey, value);
+  }
+
+  async function saveOnlineDictionaryMeanings(documentId: string, terms: string[], baseMap?: WordMeaningMap) {
+    const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
+    const nextMap = Object.fromEntries(
+      Object.entries(baseMap ?? wordMeaningMapFromSettings(state.settings)).map(([key, entries]) => [key, [...entries]]),
+    ) as WordMeaningMap;
+    const cache = onlineDictionaryCacheFromSettings(state.settings);
+    const lookupTerms = [...new Set(terms.map(normalizeWordKey))]
+      .filter((term) => term && !term.includes(" ") && !hasUsableWordMeaning(nextMap[term]))
+      .slice(0, onlineDictionaryBatchLimit);
+    const unresolved = lookupTerms.filter(
+      (term) =>
+        cache[term]?.parserVersion !== onlineDictionaryParserVersion ||
+        !normalizeOnlineDictionaryMeaning(cache[term]?.meaning ?? ""),
+    );
+    let cacheChanged = false;
+    if (unresolved.length > 0) {
+      const fetched = await mapWithConcurrency(unresolved, 6, async (term) => ({
+        term,
+        meaning: normalizeOnlineDictionaryMeaning(await fetchOnlineDictionaryMeaning(term)),
+      }));
+      for (const item of fetched) {
+        cache[item.term] = {
+          meaning: item.meaning,
+          source: onlineDictionarySourceLabel,
+          fetchedAt: nowIso(),
+          parserVersion: onlineDictionaryParserVersion,
+        };
+        cacheChanged = true;
+      }
+    }
+    for (const term of lookupTerms) {
+      const cached = cache[term];
+      if (!cached) {
+        continue;
+      }
+      const meaning = normalizeOnlineDictionaryMeaning(cached.meaning);
+      if (cached.meaning !== meaning) {
+        cached.meaning = meaning;
+        cached.source = onlineDictionarySourceLabel;
+        cached.parserVersion = onlineDictionaryParserVersion;
+        cacheChanged = true;
+      }
+    }
+    if (cacheChanged) {
+      const cacheValue = JSON.stringify(cache);
+      patchState((draft) => {
+        draft.settings[onlineDictionaryCacheSettingKey] = cacheValue;
+      });
+      await setSetting(onlineDictionaryCacheSettingKey, cacheValue);
+    }
+    let added = 0;
+    for (const term of lookupTerms) {
+      const cached = cache[term];
+      const meaning = normalizeOnlineDictionaryMeaning(cached?.meaning ?? "");
+      if (!meaning) {
+        continue;
+      }
+      const entries = nextMap[term] ?? [];
+      const duplicate = entries.some(
+        (entry) =>
+          entry.source === "dictionary" &&
+          normalizeComparable(entry.meaning) === normalizeComparable(meaning),
+      );
+      if (duplicate) {
+        continue;
+      }
+      entries.push({
+        id: makeId("wm"),
+        word: term,
+        meaning,
+        documentId,
+        documentTitle: document?.title || document?.fileName || ui.untitledPaper,
+        context: cached.source || onlineDictionarySourceLabel,
+        createdAt: nowIso(),
+        source: "dictionary",
+      });
+      nextMap[term] = entries;
+      added += 1;
+    }
+    if (added > 0) {
+      await persistWordMeaningMap(nextMap);
+    }
+    return { added, map: nextMap };
+  }
+
+  async function saveFallbackDictionaryMeanings(documentId: string, terms: string[], baseMap?: WordMeaningMap) {
+    const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
+    const nextMap = Object.fromEntries(
+      Object.entries(baseMap ?? wordMeaningMapFromSettings(state.settings)).map(([key, entries]) => [key, [...entries]]),
+    ) as WordMeaningMap;
+    let added = 0;
+    for (const term of terms) {
+      const key = normalizeWordKey(term);
+      const meaning = basicDictionaryMeaning(key);
+      if (!key || !meaning || hasUsableWordMeaning(nextMap[key])) {
+        continue;
+      }
+      const entries = nextMap[key] ?? [];
+      const duplicate = entries.some(
+        (entry) =>
+          entry.source === "local" &&
+          normalizeComparable(entry.meaning) === normalizeComparable(meaning) &&
+          normalizeComparable(entry.context) === normalizeComparable("basic dictionary"),
+      );
+      if (duplicate) {
+        continue;
+      }
+      entries.push({
+        id: makeId("wm"),
+        word: key,
+        meaning,
+        documentId,
+        documentTitle: document?.title || document?.fileName || ui.untitledPaper,
+        context: "offline fallback dictionary",
+        createdAt: nowIso(),
+        source: "local",
+      });
+      nextMap[key] = entries;
+      added += 1;
+    }
+    if (added > 0) {
+      await persistWordMeaningMap(nextMap);
+    }
+    return { added, map: nextMap };
+  }
+
+  async function queueMissingWordMeanings() {
+    if (!activeDocument) {
+      showToast(ui.openDocumentFirst);
+      return;
+    }
+    const pages = activePages.length ? activePages : await ensureActivePages();
+    if (pages.length === 0 || pages.every((page) => !page.text.trim())) {
+      showToast(ui.wordMeaningNoText);
+      return;
+    }
+    const candidates = extractDocumentTermCandidates(pages, activeDocument);
+    const terms = candidates.map((candidate) => candidate.term);
+    const storedTerms = terms.length ? await persistWordListForPages(activeDocument.id, pages) : activeDocumentWordList;
+    if (storedTerms.length === 0) {
+      showToast(ui.wordMeaningNoText);
+      return;
+    }
+    const currentMap = wordMeaningMapFromSettings(state.settings);
+    const missingCandidates = candidates
+      .filter((candidate) => {
+        if (!candidate.contextNeeded) {
+          return false;
+        }
+        const entries = currentMap[normalizeWordKey(candidate.term)] ?? [];
+        return !entries.some((entry) => entry.source === "ai" && entry.documentId === activeDocument.id);
+      })
+      .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term));
+    const missingTerms = missingCandidates.slice(0, wordMeaningBatchLimit).map((candidate) => candidate.term);
+    if (missingTerms.length === 0) {
+      showToast(ui.wordMeaningNoMissing);
+      return;
+    }
+    const queued = await queueTask(
+      wordMeaningTaskType,
+      {
+        mode: "initial",
+        words: missingTerms,
+        candidateTerms: missingCandidates.slice(0, wordMeaningBatchLimit),
+        pages,
+      },
+      { keepPanel: true },
+    );
+    if (!queued) {
+      return;
+    }
+    if (queued.status === "pending") {
+      showToast(
+        uiLanguage === "ko"
+          ? `단어 뜻 생성 중: 요청 ${missingTerms.length}개 / 전체 후보 ${storedTerms.length}개`
+          : `Building word meanings: requested ${missingTerms.length} / total candidates ${storedTerms.length}`,
+      );
+    } else {
+      await saveWordMeaningsFromResult(queued, missingTerms);
+    }
+  }
+
+  async function queueAdjustedWordMeaning(popup: WordPopup) {
+    if (!activeDocument) {
+      showToast(ui.openDocumentFirst);
+      return;
+    }
+    const word = normalizeWordKey(popup.word);
+    if (!word) {
+      return;
+    }
+    const pages = activePages.length ? activePages : await ensureActivePages();
+    const page = pages.find((item) => item.pageNumber === popup.page);
+    const existingMeanings = (wordMeaningMap[normalizeWordKey(word)] ?? []).map((entry) => ({
+      meaning: entry.meaning,
+      context: entry.context,
+      documentTitle: entry.documentTitle,
+    }));
+    const queued = await queueTask(
+      wordMeaningTaskType,
+      {
+        mode: "adjust",
+        words: [word],
+        page: popup.page,
+        context: popup.context,
+        existingMeanings,
+        pages: page ? [page] : pages.slice(0, 3),
+      },
+      { keepPanel: true },
+    );
+    if (!queued) {
+      return;
+    }
+    if (queued.status === "pending") {
+      showToast(ui.wordMeaningAdjustQueued);
+    } else {
+      await saveWordMeaningsFromResult(queued, [word]);
+    }
   }
 
   async function saveLocalAiResult(result: AiResultRecord) {
@@ -5349,6 +6997,9 @@ function App() {
         if (savedResult.taskType.toString() === "autoHighlight") {
           await saveAutoHighlightsFromResult(savedResult);
         }
+        if (savedResult.taskType.toString() === wordMeaningTaskType) {
+          await saveWordMeaningsFromResult(savedResult);
+        }
         if (item.taskType.toString() === "translatePage" && bridgeResult.status === "failed") {
           const page = activePages.find((candidate) => normalizeComparable(candidate.text) === normalizeComparable(translationInputText(item)));
           if (page) {
@@ -5395,16 +7046,6 @@ function App() {
     }, 80);
   }
 
-  function scrollTranslationSentenceIntoView(id: string) {
-    window.setTimeout(() => {
-      const target = Array.from(document.querySelectorAll<HTMLElement>(".translation-sentence")).find((node) => {
-        const sourceIds = (node.dataset.sourceSentenceIds ?? "").split(/\s+/).filter(Boolean);
-        return node.dataset.sentenceId === id || sourceIds.includes(id);
-      });
-      target?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    }, 80);
-  }
-
   function selectSentenceAndScroll(id: string) {
     setSelectedSentenceId(id);
     const page = Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
@@ -5414,18 +7055,40 @@ function App() {
     scrollPdfSentenceIntoView(id);
   }
 
-  function selectSentenceFromPdf(id: string) {
-    setSelectedSentenceId(id);
-    const page = Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
-    if (page > 0) {
-      allowTranslationForPage(page, { queue: true });
+  function openWordMeaningPopup(popup: WordPopup) {
+    if (markupTool.kind !== "none" || !wordMeaningLookupEnabled(state.settings)) {
+      return;
     }
-    if (page > 0 && page !== pageCursor) {
-      setPageCursor(page);
+    const term = bestTermForWordPopup(popup, activeDocumentWordList, wordMeaningMap);
+    setWordPopup({ ...popup, word: term });
+    if (activeDocument && term && !term.includes(" ") && !hasUsableWordMeaning(wordMeaningMap[normalizeWordKey(term)])) {
+      const key = normalizeWordKey(term);
+      setWordLookupLoadingKey(key);
+      void saveOnlineDictionaryMeanings(activeDocument.id, [term])
+        .then((result) =>
+          result.map[key]?.length
+            ? result
+            : saveFallbackDictionaryMeanings(activeDocument.id, [term], result.map),
+        )
+        .catch((error) => showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"))
+        .finally(() => setWordLookupLoadingKey((current) => (current === key ? null : current)));
     }
-    setTranslationPanelOpen(true);
-    scrollTranslationSentenceIntoView(id);
   }
+
+  useEffect(() => {
+    if (!wordPopup) {
+      return;
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".word-meaning-popover")) {
+        return;
+      }
+      setWordPopup(null);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, [wordPopup]);
 
   useEffect(() => {
     if (
@@ -5443,6 +7106,7 @@ function App() {
 
   useEffect(() => {
     setSelectedSentenceId(null);
+    setWordPopup(null);
     setTranslationEligiblePages(new Set([1]));
   }, [activeDocumentId]);
 
@@ -5577,6 +7241,13 @@ function App() {
     if (state.settings.autoTranslate === "true" && translationEligiblePages.has(page.pageNumber)) {
       void queueTranslationForPage(page, { silent: true });
     }
+    const pagesForWords = activePages
+      .filter((item) => !(item.documentId === page.documentId && item.pageNumber === page.pageNumber))
+      .concat(page)
+      .sort((a, b) => a.pageNumber - b.pageNumber);
+    void persistWordListForPages(page.documentId, pagesForWords).catch((error) =>
+      showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"),
+    );
   }
 
   function rememberPageImage(pageNumber: number, image: string) {
@@ -5900,6 +7571,17 @@ function App() {
     showToast(ui.noteSaved);
   }
 
+  async function deleteActiveNote() {
+    if (!activeNote) {
+      return;
+    }
+    await deleteNote(activeNote.id);
+    patchState((draft) => {
+      draft.notes = draft.notes.filter((item) => item.id !== activeNote.id);
+    });
+    showToast(ui.noteDeleted);
+  }
+
   async function createFolder(parentId = folderFilter === "all" ? "root" : folderFilter, nameOverride?: string) {
     const name = (nameOverride ?? newFolderName).trim();
     if (!name) {
@@ -6129,6 +7811,12 @@ function App() {
       settings.language = settings.uiLanguage;
       settings.translationLanguage = translationLanguageOption(settings.translationLanguage).value;
       settings.aiProvider = normalizeAiProviderKind(settings.aiProvider);
+      settings.codexModel = settings.codexModel || (settings.aiProvider === "codex-cli" ? settings.aiModel || "" : "");
+      settings.codexReasoningEffort = selectedCodexReasoningEffort(settings);
+      settings.claudeModel = settings.claudeModel || (settings.aiProvider === "claude-code" ? settings.aiModel || "" : "");
+      settings.autoHighlight = "false";
+      settings.wordMeaningLookupEnabled = wordMeaningLookupEnabled(settings) ? "true" : "false";
+      settings.aiModel = selectedAiModel(settings);
       setState({ ...initialState, ...result.state, settings });
       setMode("library");
       setActiveDocumentId(null);
@@ -6173,6 +7861,20 @@ function App() {
     return activePages.filter((page) => page.text.toLowerCase().includes(query)).map((page) => page.pageNumber);
   }, [activePages, searchTerm]);
 
+  function toggleSettingsMode() {
+    setWordPopup(null);
+    setMode((current) => (current === "settings" ? (activeDocument ? "reader" : "library") : "settings"));
+  }
+
+  function openLibraryMode() {
+    setWordPopup(null);
+    setMode("library");
+  }
+
+  const floatingResultIsTranslation = Boolean(
+    floatingResult && ["translateText", "translatePage"].includes(floatingResult.taskType.toString()),
+  );
+
   return (
     <UiStringsContext.Provider value={ui}>
     <div
@@ -6204,8 +7906,8 @@ function App() {
           outlineOpen={outlineOpen}
           shareReady={Boolean(activeDocument && (pdfDocument || Object.keys(pageImages).length > 0))}
           onPickFile={() => fileInputRef.current?.click()}
-          onOpenLibrary={() => setMode("library")}
-          onOpenSettings={() => setMode("settings")}
+          onOpenLibrary={openLibraryMode}
+          onOpenSettings={toggleSettingsMode}
           onZoomIn={() => commitZoom(zoom + 0.1)}
           onZoomOut={() => commitZoom(zoom - 0.1)}
           onPageChange={(page) => goToPage(page)}
@@ -6221,25 +7923,6 @@ function App() {
               setOutlineOpen(true);
             }
             setOutlineCompact(false);
-          }}
-          onShowInfo={() => {
-            setRightPanelOpen(true);
-            setActivePanel("info");
-          }}
-          onShowMore={() => {
-            setRightPanelOpen(true);
-            setActivePanel("info");
-          }}
-          onAutoHighlight={() => {
-            setAutoHighlightMenuOpen((value) => !value);
-          }}
-          onRunAutoHighlight={() => void runAutoHighlightForCurrentPage()}
-          onToggleAutoHighlight={() => {
-            const next = state.settings.autoHighlight === "true" ? "false" : "true";
-            patchState((draft) => {
-              draft.settings.autoHighlight = next;
-            });
-            void setSetting("autoHighlight", next);
           }}
           onStartRegionExplain={() => {
             setRegionMode(true);
@@ -6260,9 +7943,7 @@ function App() {
           }}
           onShareFile={() => void shareAnnotatedFile()}
           autoTranslate={state.settings.autoTranslate === "true"}
-          autoHighlight={state.settings.autoHighlight === "true"}
           translationPanelOpen={translationPanelOpen}
-          autoHighlightOpen={autoHighlightMenuOpen}
         />
 
         <input
@@ -6312,6 +7993,18 @@ function App() {
               .join(" ")}
             style={readerGridStyle}
           >
+            <ReaderRail
+              ui={ui}
+              outlineOpen={outlineOpen}
+              translationPanelOpen={translationPanelOpen}
+              rightPanelOpen={rightPanelOpen}
+              onShowOutline={() => {
+                setOutlineOpen((value) => !value);
+                setOutlineCompact(false);
+              }}
+              onToggleTranslationPanel={() => setTranslationPanelOpen((value) => !value)}
+              onTogglePanel={() => setRightPanelOpen((value) => !value)}
+            />
             {outlineOpen && (
               <ReaderOutline
                 compact={outlineCompact}
@@ -6326,9 +8019,33 @@ function App() {
                 onGoToRow={goToOutlineRow}
               />
             )}
+            {translationPanelOpen && (
+              <TranslationSidecar
+                ui={ui}
+                translationLanguageName={translationLanguageName}
+                page={pageCursor}
+                pageCount={pdfDocument?.numPages ?? activeDocument?.pageCount ?? 0}
+                units={currentTranslationUnits}
+                selectedSentenceId={selectedSentenceId}
+                pending={Boolean(translationResultForPage(activeAiResults, currentPage, translationLanguageName)?.status === "pending")}
+                autoTranslate={state.settings.autoTranslate === "true"}
+                onSelectSentence={selectSentenceAndScroll}
+                onRefresh={() => currentPage && void refreshTranslationForPage(currentPage)}
+                onTranslatePage={() => currentPage && void refreshTranslationForPage(currentPage)}
+                onResizeStart={(event) => startLayoutResize("translation", event)}
+                onClose={() => setTranslationPanelOpen(false)}
+              />
+            )}
             <div
               ref={readerRef}
-              className={regionMode ? "pdf-stage region-mode" : "pdf-stage"}
+              className={[
+                "pdf-stage",
+                regionMode ? "region-mode" : "",
+                markupTool.kind === "erase" ? "highlight-erase-mode" : "",
+                markupTool.kind === "highlight" ? "highlight-paint-mode" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               onMouseDown={handleRegionMouseDown}
               onMouseMove={handleRegionMouseMove}
               onMouseUp={(event) => void finishRegionExplain(event)}
@@ -6337,6 +8054,44 @@ function App() {
                 scheduleReaderCursorSync(event.currentTarget);
               }}
             >
+              <ReaderActionPalette
+                ui={ui}
+                markupTool={markupTool}
+                autoTranslate={state.settings.autoTranslate === "true"}
+                wordMeaningLookupEnabled={wordMeaningLookupEnabled(state.settings)}
+                wordListCount={activeDocumentWordList.length}
+                missingWordCount={missingWordCount}
+                onSelectHighlightColor={(color) =>
+                  setMarkupTool((current) =>
+                    current.kind === "highlight" && current.color === color ? { kind: "none" } : { kind: "highlight", color },
+                  )
+                }
+                onSelectEraser={() =>
+                  setMarkupTool((current) => (current.kind === "erase" ? { kind: "none" } : { kind: "erase" }))
+                }
+                onStartRegionExplain={() => {
+                  setRegionMode(true);
+                  showToast(ui.dragRegionPrompt);
+                }}
+                onToggleAutoTranslate={() => {
+                  const next = state.settings.autoTranslate === "true" ? "false" : "true";
+                  patchState((draft) => {
+                    draft.settings.autoTranslate = next;
+                  });
+                  void setSetting("autoTranslate", next);
+                }}
+                onToggleWordMeaningLookup={() => {
+                  const next = wordMeaningLookupEnabled(state.settings) ? "false" : "true";
+                  patchState((draft) => {
+                    draft.settings[wordMeaningLookupEnabledSettingKey] = next;
+                  });
+                  if (next === "false") {
+                    setWordPopup(null);
+                  }
+                  void setSetting(wordMeaningLookupEnabledSettingKey, next);
+                }}
+                onBuildWordMeanings={() => void queueMissingWordMeanings()}
+              />
               {!activeDocument && <EmptyReader onPickFile={() => fileInputRef.current?.click()} />}
               {activeDocument && !pdfDocument && (
                 <EmptyReader
@@ -6360,7 +8115,8 @@ function App() {
                     hoverSource={hoverSource}
                     sentenceUnits={sentenceUnitsForPage(activePages.find((page) => page.pageNumber === pageNumber))}
                     selectedSentenceIds={selectedSentenceIds}
-                    onSentenceSelect={selectSentenceFromPdf}
+                    highlightEraseActive={markupTool.kind === "erase"}
+                    onWordSelect={openWordMeaningPopup}
                     regionDrag={regionDrag}
                     onTextReady={createPageText}
                     onOutlineReady={rememberOutlineAnchors}
@@ -6371,88 +8127,74 @@ function App() {
                   />
                 ))}
             </div>
-            {translationPanelOpen && (
-              <TranslationSidecar
-                ui={ui}
-                translationLanguageName={translationLanguageName}
-                page={pageCursor}
-                pageCount={pdfDocument?.numPages ?? activeDocument?.pageCount ?? 0}
-                units={currentTranslationUnits}
-                selectedSentenceId={selectedSentenceId}
-                pending={Boolean(translationResultForPage(activeAiResults, currentPage, translationLanguageName)?.status === "pending")}
-                autoTranslate={state.settings.autoTranslate === "true"}
-                onSelectSentence={selectSentenceAndScroll}
-                onRefresh={() => currentPage && void refreshTranslationForPage(currentPage)}
-                onResizeStart={(event) => startLayoutResize("translation", event)}
-                onClose={() => setTranslationPanelOpen(false)}
+            {rightPanelOpen && (
+              <RightPanel
+                tab={activePanel}
+                setTab={setActivePanel}
+                document={activeDocument}
+                pages={activePages}
+                annotations={activeAnnotations}
+                aiResults={activeAiResults}
+                citations={activeCitations}
+                note={activeNote}
+                settings={state.settings}
+                outlineRows={activeOutlineRows}
+                searchMatches={pageMatches}
+                onQueueTask={(type, payload) => void queueTask(type, payload)}
+                onRunBridge={() => void runPendingBridgeWorkers()}
+                onPollBridge={() => void pollBridge()}
+                onStartRegionExplain={() => {
+                  setRegionMode(true);
+                  showToast(ui.dragRegionPrompt);
+                }}
+                onUpdateAnnotation={(annotation) =>
+                  void upsertAnnotation(annotation).then((saved) =>
+                    patchState((draft) => {
+                      draft.annotations = [saved, ...draft.annotations.filter((item) => item.id !== saved.id)];
+                    }),
+                  )
+                }
+                onDeleteAnnotation={(id) =>
+                  void deleteAnnotationById(id)
+                }
+                onDeleteAllAnnotations={() => void deleteAllActiveAnnotations()}
+                onDeleteExplanation={(result) => void deleteExplanationResult(result)}
+                onGoToPage={goToPage}
+                onExtractCitations={() => void extractCitationCards()}
+                onResolveCitationLinks={() => void resolveCitationLinks()}
+                onDeleteCitation={(id) =>
+                  void deleteCitationCard(id).then(() =>
+                    patchState((draft) => {
+                      draft.citationCards = draft.citationCards.filter((item) => item.id !== id);
+                    }),
+                  )
+                }
+                onSaveCitation={(card) =>
+                  void upsertCitationCard(card).then((saved) =>
+                    patchState((draft) => {
+                      draft.citationCards = [saved, ...draft.citationCards.filter((item) => item.id !== saved.id)];
+                    }),
+                  )
+                }
+                onSaveNote={(markdown) => saveNote(markdown)}
+                onDeleteNote={() => deleteActiveNote()}
+                onMetadata={updateMetadata}
+                onMoveFolder={(folderId) => void moveActiveDocument(folderId)}
+                folders={state.folders}
+                onJsonExport={() => void exportJson()}
+                onZipExport={() => void exportZip()}
+                onCopy={copyText}
+                onHoverSource={setHoverSource}
+                chatDraft={chatDraft}
+                setChatDraft={setChatDraft}
+                assistantMode={assistantMode}
+                setAssistantMode={setAssistantMode}
+                pageCursor={pageCursor}
+                pageImages={pageImages}
+                onResizeStart={(event) => startLayoutResize("rightPanel", event)}
+                onClose={() => setRightPanelOpen(false)}
               />
             )}
-            {rightPanelOpen && <RightPanel
-              tab={activePanel}
-              setTab={setActivePanel}
-              document={activeDocument}
-              pages={activePages}
-              annotations={activeAnnotations}
-              aiResults={activeAiResults}
-              citations={activeCitations}
-              note={activeNote}
-              settings={state.settings}
-              outlineRows={activeOutlineRows}
-              searchMatches={pageMatches}
-              onQueueTask={(type, payload) => void queueTask(type, payload)}
-              onRunBridge={() => void runPendingBridgeWorkers()}
-              onPollBridge={() => void pollBridge()}
-              onAutoHighlight={() => void runAutoHighlightForCurrentPage()}
-              onStartRegionExplain={() => {
-                setRegionMode(true);
-                showToast(ui.dragRegionPrompt);
-              }}
-              onUpdateAnnotation={(annotation) =>
-                void upsertAnnotation(annotation).then((saved) =>
-                  patchState((draft) => {
-                    draft.annotations = [saved, ...draft.annotations.filter((item) => item.id !== saved.id)];
-                  }),
-                )
-              }
-              onDeleteAnnotation={(id) =>
-                void deleteAnnotationById(id)
-              }
-              onDeleteAllAnnotations={() => void deleteAllActiveAnnotations()}
-              onDeleteExplanation={(result) => void deleteExplanationResult(result)}
-              onGoToPage={goToPage}
-              onExtractCitations={() => void extractCitationCards()}
-              onResolveCitationLinks={() => void resolveCitationLinks()}
-              onDeleteCitation={(id) =>
-                void deleteCitationCard(id).then(() =>
-                  patchState((draft) => {
-                    draft.citationCards = draft.citationCards.filter((item) => item.id !== id);
-                  }),
-                )
-              }
-              onSaveCitation={(card) =>
-                void upsertCitationCard(card).then((saved) =>
-                  patchState((draft) => {
-                    draft.citationCards = [saved, ...draft.citationCards.filter((item) => item.id !== saved.id)];
-                  }),
-                )
-              }
-              onSaveNote={(markdown) => saveNote(markdown)}
-              onMetadata={updateMetadata}
-              onMoveFolder={(folderId) => void moveActiveDocument(folderId)}
-              folders={state.folders}
-              onJsonExport={() => void exportJson()}
-              onZipExport={() => void exportZip()}
-              onCopy={copyText}
-              onHoverSource={setHoverSource}
-              chatDraft={chatDraft}
-              setChatDraft={setChatDraft}
-              assistantMode={assistantMode}
-              setAssistantMode={setAssistantMode}
-              pageCursor={pageCursor}
-              pageImages={pageImages}
-              onResizeStart={(event) => startLayoutResize("rightPanel", event)}
-              onClose={() => setRightPanelOpen(false)}
-            />}
           </section>
         )}
 
@@ -6489,12 +8231,23 @@ function App() {
         />
       )}
 
-      {floatingResult && (
+      {floatingResult && (!floatingResultIsTranslation || translationPanelOpen) && (
         <FloatingAiCard
           result={floatingResult}
           onClose={() => setFloatingResultId(null)}
           onCopy={() => void copyText(getReadableAiOutput(floatingResult, ui), taskTitle(floatingResult.taskType.toString(), ui))}
           onDelete={(result) => void deleteExplanationResult(result)}
+        />
+      )}
+
+      {wordPopup && (
+        <WordMeaningPopup
+          ui={ui}
+          popup={wordPopup}
+          entries={displayWordMeaningEntries(wordMeaningMap[normalizeWordKey(wordPopup.word)] ?? [])}
+          loading={wordLookupLoadingKey === normalizeWordKey(wordPopup.word)}
+          onClose={() => setWordPopup(null)}
+          onAdjust={() => void queueAdjustedWordMeaning(wordPopup)}
         />
       )}
 
@@ -6558,19 +8311,12 @@ type TopToolbarProps = {
   onTogglePanel: () => void;
   onToggleTranslationPanel: () => void;
   onShowOutline: () => void;
-  onShowInfo: () => void;
-  onShowMore: () => void;
-  onAutoHighlight: () => void;
-  onRunAutoHighlight: () => void;
-  onToggleAutoHighlight: () => void;
   onStartRegionExplain: () => void;
   onTranslatePage: () => void;
   onToggleAutoTranslate: () => void;
   onShareFile: () => void;
   autoTranslate: boolean;
-  autoHighlight: boolean;
   translationPanelOpen: boolean;
-  autoHighlightOpen: boolean;
 };
 
 function ReaderOutline(props: {
@@ -6586,7 +8332,7 @@ function ReaderOutline(props: {
   onGoToRow: (row: OutlineRow) => void;
 }) {
   const ui = useUiStrings();
-  const rows = props.rows.length ? props.rows : fallbackOutlineRows([], props.pages);
+  const rows = props.rows;
   return (
     <aside className={props.compact ? "reader-outline compact" : "reader-outline"}>
       <button className="panel-resizer right" title={ui.resizeOutline} onPointerDown={props.onResizeStart} />
@@ -6603,6 +8349,7 @@ function ReaderOutline(props: {
       </button>
       {props.compact ? (
         <nav className="outline-grid" aria-label={ui.pageGrid}>
+          {rows.length === 0 && <p className="muted outline-empty">{ui.aiOutlinePending}</p>}
           {rows.map((row) => (
             <button
               key={`grid-${row.id}`}
@@ -6632,6 +8379,7 @@ function ReaderOutline(props: {
             </span>
           </div>
           <nav className="outline-list">
+            {rows.length === 0 && <p className="muted outline-empty">{ui.aiOutlinePending}</p>}
             {rows.map((row) => (
               <button
                 key={row.id}
@@ -6641,9 +8389,8 @@ function ReaderOutline(props: {
                 style={{ "--outline-level": row.level } as CSSProperties}
                 title={row.title}
               >
-                <ChevronRight size={13} />
                 <span>
-                  <small>{row.page}</small>
+              <small>User</small>
                   <b>
                     <OutlineTitleText text={row.title} />
                   </b>
@@ -6657,126 +8404,265 @@ function ReaderOutline(props: {
   );
 }
 
-function TopToolbar(props: TopToolbarProps) {
+function ReaderRail(props: {
+  ui: UiStrings;
+  outlineOpen: boolean;
+  translationPanelOpen: boolean;
+  rightPanelOpen: boolean;
+  onShowOutline: () => void;
+  onToggleTranslationPanel: () => void;
+  onTogglePanel: () => void;
+}) {
   return (
-    <header className="top-toolbar">
-      <div className="toolbar-actions">
+    <nav className="reader-rail" aria-label="Reader workspace">
+      <button className="rail-mark" title="Paper Pilot" data-tooltip="Paper Pilot" aria-label="Paper Pilot">
+        <BookOpen size={18} />
+      </button>
+      <div className="rail-group">
         <button
-          title={props.ui.library}
-          className={props.mode === "library" ? "toolbar-text-button active" : "toolbar-text-button"}
-          onClick={props.onOpenLibrary}
-        >
-          <Library size={17} />
-          <span>{props.ui.library}</span>
-        </button>
-        <button
-          title={props.ui.settings}
-          className={props.mode === "settings" ? "toolbar-text-button active" : "toolbar-text-button"}
-          onClick={props.onOpenSettings}
-        >
-          <Settings size={17} />
-          <span>{props.ui.settings}</span>
-        </button>
-        <button
+          className={props.outlineOpen ? "active" : ""}
           title={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
-          className={props.mode === "reader" && props.outlineOpen ? "toolbar-toggle active" : "toolbar-toggle"}
+          data-tooltip={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
+          aria-label={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
           onClick={props.onShowOutline}
         >
-          <List size={18} />
-        </button>
-        <button title={props.ui.documentInfo} className="toolbar-toggle" onClick={props.onShowInfo}>
-          <Info size={17} />
+          <ListTree size={18} />
         </button>
         <button
-          title={props.ui.search}
-          className="toolbar-toggle"
-          onClick={() => {
-            const query = window.prompt(props.ui.searchPrompt, props.searchTerm.trim());
-            if (query !== null) {
-              props.onSearch(query.trim());
-            }
-          }}
-        >
-          <Search size={17} />
-        </button>
-        <select
-          className="zoom-select"
-          value={Math.round(props.zoom * 100)}
-          onChange={(event) => props.onZoomChange(Number(event.target.value) / 100)}
-          title={props.ui.zoom}
-        >
-          <option value="80">80%</option>
-          <option value="100">100%</option>
-          <option value="113">113%</option>
-          <option value="125">125%</option>
-          <option value="150">150%</option>
-          <option value="175">175%</option>
-        </select>
-        <button title={props.ui.zoomOut} className="toolbar-icon" onClick={props.onZoomOut}>
-          <ZoomOut size={16} />
-        </button>
-        <button title={props.ui.zoomIn} className="toolbar-icon" onClick={props.onZoomIn}>
-          <ZoomIn size={16} />
-        </button>
-        <input
-          className="toolbar-page-input"
-          type="number"
-          min={1}
-          max={Math.max(1, props.pageCount)}
-          value={props.pageCursor}
-          onChange={(event) => props.onPageChange(Number(event.target.value))}
-          title={props.ui.page}
-        />
-        <span className="toolbar-page-total">/ {Math.max(1, props.pageCount)}</span>
-      </div>
-      <div className="reader-tools">
-        <div className="toolbar-popover-wrap">
-          <button className={props.autoHighlight ? "toolbar-text-button active" : "toolbar-text-button"} title={props.ui.autoHighlight} onClick={props.onAutoHighlight}>
-            <Highlighter size={17} />
-            <span>{props.ui.autoHighlight}</span>
-            {props.autoHighlightOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
-          {props.autoHighlightOpen && (
-            <AutoHighlightMenu
-              enabled={props.autoHighlight}
-              onToggle={props.onToggleAutoHighlight}
-              onRun={props.onRunAutoHighlight}
-            />
-          )}
-        </div>
-        <button className="toolbar-text-button" title={props.ui.explainImage} onClick={props.onStartRegionExplain}>
-          <Maximize2 size={17} />
-          <span>{props.ui.explainImage}</span>
-        </button>
-        <button className={props.autoTranslate ? "toolbar-text-button active" : "toolbar-text-button"} title={props.ui.autoTranslate} onClick={props.onToggleAutoTranslate}>
-          <Languages size={17} />
-          <span>{props.ui.autoTranslate}</span>
-        </button>
-        <button className="toolbar-text-button" title={props.ui.translatePage} onClick={props.onTranslatePage}>
-          <Sparkles size={17} />
-          <span>{props.ui.translatePage}</span>
-        </button>
-        <button
-          className={props.translationPanelOpen ? "toolbar-text-button active" : "toolbar-text-button"}
+          className={props.translationPanelOpen ? "active" : ""}
           title={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
+          data-tooltip={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
+          aria-label={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
           onClick={props.onToggleTranslationPanel}
         >
-          <PanelRight size={17} />
-          <span>{props.ui.translationPanel}</span>
+          <Languages size={18} />
+        </button>
+        <button
+          className={props.rightPanelOpen ? "active" : ""}
+          title={props.ui.panel}
+          data-tooltip={props.ui.panel}
+          aria-label={props.ui.panel}
+          onClick={props.onTogglePanel}
+        >
+          <MessageSquareText size={18} />
         </button>
       </div>
+    </nav>
+  );
+}
+
+function ReaderActionPalette(props: {
+  ui: UiStrings;
+  markupTool: ReaderMarkupTool;
+  autoTranslate: boolean;
+  wordMeaningLookupEnabled: boolean;
+  wordListCount: number;
+  missingWordCount: number;
+  onSelectHighlightColor: (color: string) => void;
+  onSelectEraser: () => void;
+  onStartRegionExplain: () => void;
+  onToggleAutoTranslate: () => void;
+  onToggleWordMeaningLookup: () => void;
+  onBuildWordMeanings: () => void;
+}) {
+  const wordMeaningTitle = props.wordListCount
+    ? `${props.ui.buildWordMeanings} (${props.missingWordCount}/${props.wordListCount})`
+    : props.ui.buildWordMeanings;
+  const preparedColors = highlightColors.slice(0, 3);
+  return (
+    <div className="reader-action-palette" aria-label="Reader tools">
+      <div className="markup-tool-group" aria-label={props.ui.highlight}>
+        <Highlighter size={15} />
+        <div className="highlight-color-stack">
+          {preparedColors.map((color) => {
+            const active = props.markupTool.kind === "highlight" && props.markupTool.color === color.value;
+            return (
+              <button
+                key={color.value}
+                className={active ? "floating-tool color-tool active" : "floating-tool color-tool"}
+                title={`${props.ui.highlight} ${color.name}`}
+                data-tooltip={`${props.ui.highlight} ${color.name}`}
+                aria-label={`${props.ui.highlight} ${color.name}`}
+                style={{ "--tool-color": color.value } as CSSProperties}
+                onClick={() => props.onSelectHighlightColor(color.value)}
+              />
+            );
+          })}
+        </div>
+        <button
+          className={props.markupTool.kind === "erase" ? "floating-tool active" : "floating-tool"}
+          title={props.ui.delete}
+          data-tooltip={props.ui.delete}
+          aria-label={props.ui.delete}
+          onClick={props.onSelectEraser}
+        >
+          <Eraser size={16} />
+        </button>
+      </div>
+      <button className="floating-tool" title={props.ui.explainImage} data-tooltip={props.ui.explainImage} aria-label={props.ui.explainImage} onClick={props.onStartRegionExplain}>
+        <Maximize2 size={17} />
+      </button>
+      <button
+        className={props.autoTranslate ? "floating-tool active" : "floating-tool"}
+        title={props.ui.autoTranslate}
+        data-tooltip={props.ui.autoTranslate}
+        aria-label={props.ui.autoTranslate}
+        onClick={props.onToggleAutoTranslate}
+      >
+        <Languages size={17} />
+      </button>
+      <button
+        className={props.wordMeaningLookupEnabled ? "floating-tool active" : "floating-tool"}
+        title={props.wordMeaningLookupEnabled ? props.ui.wordMeaningLookupOn : props.ui.wordMeaningLookupOff}
+        data-tooltip={props.wordMeaningLookupEnabled ? props.ui.wordMeaningLookupOn : props.ui.wordMeaningLookupOff}
+        aria-label={props.wordMeaningLookupEnabled ? props.ui.wordMeaningLookupOn : props.ui.wordMeaningLookupOff}
+        onClick={props.onToggleWordMeaningLookup}
+      >
+        <BookOpen size={17} />
+      </button>
+      <button className="floating-tool with-badge" title={wordMeaningTitle} data-tooltip={wordMeaningTitle} aria-label={wordMeaningTitle} onClick={props.onBuildWordMeanings}>
+        <Sparkles size={17} />
+        {props.missingWordCount > 0 && <span className="floating-badge">{Math.min(99, props.missingWordCount)}</span>}
+      </button>
+    </div>
+  );
+}
+
+function WordMeaningPopup(props: {
+  ui: UiStrings;
+  popup: WordPopup;
+  entries: WordMeaningEntry[];
+  loading: boolean;
+  onClose: () => void;
+  onAdjust: () => void;
+}) {
+  const top = clampNumber(props.popup.y, 72, Math.max(120, window.innerHeight - 220));
+  const left =
+    props.popup.side === "left"
+      ? clampNumber(props.popup.x, 260, Math.max(280, window.innerWidth - 12))
+      : clampNumber(props.popup.x, 12, Math.max(280, window.innerWidth - 280));
+  return (
+    <aside
+      className={`word-meaning-popover ${props.popup.side}`}
+      style={{ top, left }}
+      aria-label={props.ui.wordMeanings}
+    >
+      <div className="word-meaning-head">
+        <div>
+          <strong>{props.popup.word}</strong>
+        </div>
+        <button title={props.ui.dismissMessage} type="button" onClick={props.onClose}>
+          <X size={14} />
+        </button>
+      </div>
+      <div className="word-meaning-list">
+        {props.entries.length === 0 && props.loading && (
+          <div className="word-meaning-empty">
+            <span>{props.ui.wordMeaningLoading}</span>
+          </div>
+        )}
+        {props.entries.length === 0 && !props.loading && (
+          <div className="word-meaning-empty">
+            <span>{props.ui.wordMeaningNone}</span>
+            <button type="button" onClick={props.onAdjust}>
+              <Sparkles size={14} />
+              <span>{props.ui.adjustWordMeaning}</span>
+            </button>
+          </div>
+        )}
+        {props.entries.map((entry) => (
+          <article key={entry.id} className="word-meaning-row">
+            <div>
+              <p>{entry.meaning}</p>
+            </div>
+            <button type="button" title={props.ui.adjustWordMeaning} onClick={props.onAdjust}>
+              <Sparkles size={13} />
+              <span>{props.ui.adjustWordMeaning}</span>
+            </button>
+          </article>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function TopToolbar(props: TopToolbarProps) {
+  const title =
+    props.mode === "reader"
+      ? props.document?.title || "Paper Pilot"
+      : props.mode === "library"
+        ? props.ui.library
+        : props.ui.settings;
+  const zoomPercent = Math.round(props.zoom * 100);
+  const zoomOptions = [80, 100, 105, 113, 125, 150, 175];
+  const resolvedZoomOptions = zoomOptions.includes(zoomPercent)
+    ? zoomOptions
+    : [...zoomOptions, zoomPercent].sort((a, b) => a - b);
+  return (
+    <header className="top-toolbar">
+      <div className="toolbar-document">
+        <button title={props.ui.library} data-tooltip={props.ui.library} aria-label={props.ui.library} className={props.mode === "library" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenLibrary}>
+          <Library size={17} />
+        </button>
+        <div>
+          <span>{props.mode === "reader" ? props.ui.page : "Paper Pilot"}</span>
+          <strong>{title}</strong>
+        </div>
+      </div>
+      <div className={props.mode === "reader" ? "toolbar-actions" : "toolbar-actions toolbar-actions-empty"}>
+        {props.mode === "reader" && (
+          <>
+            <select
+              className="zoom-select"
+              value={zoomPercent}
+              onChange={(event) => props.onZoomChange(Number(event.target.value) / 100)}
+              title={props.ui.zoom}
+            >
+              {resolvedZoomOptions.map((value) => (
+                <option key={value} value={value}>{value}%</option>
+              ))}
+            </select>
+            <button title={props.ui.zoomOut} data-tooltip={props.ui.zoomOut} aria-label={props.ui.zoomOut} className="toolbar-icon" onClick={props.onZoomOut}>
+              <ZoomOut size={16} />
+            </button>
+            <button title={props.ui.zoomIn} data-tooltip={props.ui.zoomIn} aria-label={props.ui.zoomIn} className="toolbar-icon" onClick={props.onZoomIn}>
+              <ZoomIn size={16} />
+            </button>
+            <input
+              className="toolbar-page-input"
+              type="number"
+              min={1}
+              max={Math.max(1, props.pageCount)}
+              value={props.pageCursor}
+              onChange={(event) => props.onPageChange(Number(event.target.value))}
+              title={props.ui.page}
+            />
+            <span className="toolbar-page-total">/ {Math.max(1, props.pageCount)}</span>
+            <div className="toolbar-search" title={props.ui.search}>
+              <Search size={17} />
+              <input
+                value={props.searchTerm}
+                placeholder={props.ui.search}
+                onChange={(event) => props.onSearch(event.target.value)}
+              />
+              {props.searchTerm && (
+                <button type="button" title={props.ui.dismissMessage} onClick={() => props.onSearch("")}>
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
       <div className="toolbar-trailing">
-        <button title={props.ui.shareTranslatedPdf} className="toolbar-icon" onClick={props.onShareFile} disabled={!props.shareReady}>
+        <button title={props.ui.shareTranslatedPdf} data-tooltip={props.ui.shareTranslatedPdf} aria-label={props.ui.shareTranslatedPdf} className="toolbar-icon" onClick={props.onShareFile} disabled={!props.shareReady}>
           <Share2 size={17} />
         </button>
-        <button title={props.ui.addPdf} className="toolbar-icon" onClick={props.onPickFile}>
+        <button title={props.ui.addPdf} data-tooltip={props.ui.addPdf} aria-label={props.ui.addPdf} className="toolbar-icon" onClick={props.onPickFile}>
           <Upload size={17} />
         </button>
-        <button title={props.ui.more} className="toolbar-icon" onClick={props.onShowMore}>
-          <MoreVertical size={18} />
-        </button>
-        <button title={props.ui.panel} className="toolbar-icon" onClick={props.onTogglePanel}>
-          <PanelRight size={17} />
+        <button title={props.ui.settings} data-tooltip={props.ui.settings} aria-label={props.ui.settings} className={props.mode === "settings" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenSettings}>
+          <Settings size={17} />
         </button>
         {props.busy && <span className="busy-pill">{props.ui.working}</span>}
       </div>
@@ -7035,7 +8921,7 @@ function LibraryManagerView(props: LibraryManagerViewProps) {
                   {row.childCount > 0 ? <ChevronRight size={13} /> : <span className="folder-row-spacer" />}
                   <FolderOpen size={16} />
                   <span>{folderDisplayName(row.folder, ui)}</span>
-                  <small>{row.totalDocumentCount}</small>
+              <small>User</small>
                 </button>
                 <div className="folder-row-actions">
                   <button data-folder-action="create-child" title={ui.createChildFolder} onClick={() => props.onCreateChildFolder(row.folder.id)}>
@@ -7217,7 +9103,8 @@ type PdfPageViewProps = {
   hoverSource: string | null;
   sentenceUnits: SentenceUnit[];
   selectedSentenceIds: string[];
-  onSentenceSelect: (id: string) => void;
+  highlightEraseActive: boolean;
+  onWordSelect: (popup: WordPopup) => void;
   regionDrag: {
     page: number;
     startX: number;
@@ -7363,11 +9250,11 @@ function PdfPageView(props: PdfPageViewProps) {
       props.onImageReady(props.pageNumber, canvas.toDataURL("image/png"));
 
       const content = await page.getTextContent();
-      const text = content.items
-        .map((item) => item.str ?? "")
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const extractedTextLayer = textBoxesFromPdfItems(content.items, viewport, props.zoom);
+      const text =
+        dehyphenateLineBreaks(extractedTextLayer.text) ||
+        extractedTextLayer.text ||
+        content.items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
       props.onTextReady({
         documentId: props.documentId,
         pageNumber: props.pageNumber,
@@ -7379,13 +9266,12 @@ function PdfPageView(props: PdfPageViewProps) {
       layer.innerHTML = "";
       layer.style.width = `${viewport.width}px`;
       layer.style.height = `${viewport.height}px`;
-      const util = (pdfjsLib as unknown as { Util: { transform: (a: number[], b: number[]) => number[] } }).Util;
       const bounds = sentenceBounds(text, props.sentenceUnits);
       const selectedIds = new Set(props.selectedSentenceIds);
       let textCursor = 0;
       const textBoxes: TextLayerBox[] = [];
-      for (const item of content.items) {
-        const raw = (item.str ?? "").trim();
+      for (const sourceBox of extractedTextLayer.boxes) {
+        const raw = sourceBox.text.trim();
         if (!raw) {
           continue;
         }
@@ -7394,15 +9280,14 @@ function PdfPageView(props: PdfPageViewProps) {
         const itemEnd = itemStart + raw.length;
         textCursor = itemEnd;
         const sentence = bounds.find((bound) => itemStart < bound.end && itemEnd > bound.start);
-        const transform = item.transform ? util.transform(viewport.transform, item.transform) : [1, 0, 0, 1, 0, 0];
-        const fontHeight = Math.max(8, Math.hypot(transform[2], transform[3]));
+        const fontHeight = sourceBox.fontSize;
         const span = document.createElement("span");
         span.textContent = `${raw} `;
-        span.style.left = `${transform[4]}px`;
-        span.style.top = `${transform[5] - fontHeight}px`;
+        span.style.left = `${sourceBox.rect.left}px`;
+        span.style.top = `${sourceBox.rect.top}px`;
         span.style.fontSize = `${fontHeight}px`;
-        span.style.height = `${fontHeight * 1.25}px`;
-        span.style.fontFamily = item.fontName ? `${item.fontName}, sans-serif` : "sans-serif";
+        span.style.height = `${sourceBox.rect.height}px`;
+        span.style.fontFamily = sourceBox.fontName ? `${sourceBox.fontName}, sans-serif` : "sans-serif";
         span.dataset.text = raw;
         if (sentence) {
           span.dataset.sentenceId = sentence.id;
@@ -7421,7 +9306,7 @@ function PdfPageView(props: PdfPageViewProps) {
           span.classList.add("hover-hit");
         }
         layer.appendChild(span);
-        const targetWidth = typeof item.width === "number" && item.width > 0 ? item.width * props.zoom : 0;
+        const targetWidth = sourceBox.rect.width;
         const naturalWidth = span.getBoundingClientRect().width;
         if (targetWidth > 0 && naturalWidth > 0) {
           const scaleX = Math.min(3, Math.max(0.2, targetWidth / naturalWidth));
@@ -7432,16 +9317,17 @@ function PdfPageView(props: PdfPageViewProps) {
           start: itemStart,
           end: itemEnd,
           rect: {
-            left: transform[4],
-            top: transform[5] - fontHeight,
+            left: sourceBox.rect.left,
+            top: sourceBox.rect.top,
             width: targetWidth > 0 ? targetWidth : naturalWidth,
-            height: fontHeight * 1.25,
+            height: sourceBox.rect.height,
           },
           fontSize: fontHeight,
-          fontName: item.fontName ?? "",
+          fontName: sourceBox.fontName,
         });
       }
       const detectedAnchors = detectedOutlineAnchorsForPage(props.pageNumber, textBoxes, viewport.width, viewport.height);
+      annotateHyphenatedTextSpans(layer);
       props.onOutlineReady(props.pageNumber, detectedAnchors);
       setOutlineAnchors(detectedAnchors);
       setTextLayerMetrics({ text, boxes: textBoxes });
@@ -7501,7 +9387,7 @@ function PdfPageView(props: PdfPageViewProps) {
     <div id={`page-${props.pageNumber}`} className="pdf-page-shell" data-page={props.pageNumber}>
       <div className="page-label">Page {props.pageNumber}</div>
       <canvas ref={canvasRef} />
-      <div className="highlight-layer">
+      <div className={props.highlightEraseActive ? "highlight-layer erase-active" : "highlight-layer"}>
         {props.annotations.flatMap((annotation) => {
           const rects = annotation.rects.length > 0 ? annotation.rects : derivedRects[annotation.id] ?? [];
           return rects.map((rect, index) => {
@@ -7518,6 +9404,23 @@ function PdfPageView(props: PdfPageViewProps) {
                   background: annotation.color,
                 }}
                 title={annotation.tag || annotation.comment || ui.highlight}
+                onMouseDown={(event) => {
+                  if (props.highlightEraseActive) {
+                    event.stopPropagation();
+                  }
+                }}
+                onMouseUp={(event) => {
+                  if (props.highlightEraseActive) {
+                    event.stopPropagation();
+                  }
+                }}
+                onClick={(event) => {
+                  if (!props.highlightEraseActive) {
+                    return;
+                  }
+                  event.stopPropagation();
+                  props.onDeleteAnnotation(annotation.id);
+                }}
               />
             );
           });
@@ -7590,10 +9493,28 @@ function PdfPageView(props: PdfPageViewProps) {
         ref={textLayerRef}
         className="text-layer"
         onClick={(event) => {
-          const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-sentence-id]");
-          const id = target?.dataset.sentenceId;
-          if (id) {
-            props.onSentenceSelect(id);
+          const textTarget = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text]");
+          if (textTarget) {
+            const rect = textTarget.getBoundingClientRect();
+            const raw = textTarget.dataset.text || "";
+            const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
+            const word = clickedWordFromTextSpan(raw, ratio, textTarget.dataset.combinedWord);
+            if (word) {
+              const sentenceId = textTarget.dataset.sentenceId;
+              const sentence = sentenceId ? props.sentenceUnits.find((unit) => unit.id === sentenceId) : null;
+              const shell = textTarget.closest<HTMLElement>(".pdf-page-shell");
+              const shellRect = shell?.getBoundingClientRect();
+              const side = shellRect && event.clientX < shellRect.left + shellRect.width / 2 ? "left" : "right";
+              props.onWordSelect({
+                word,
+                page: props.pageNumber,
+                sourceSentenceId: sentenceId,
+                context: sentence?.source || raw,
+                x: side === "left" ? rect.left - 12 : rect.right + 12,
+                y: rect.top + rect.height / 2,
+                side,
+              });
+            }
           }
         }}
       />
@@ -7607,7 +9528,7 @@ function readableTranslationLines(text: string) {
     return [""];
   }
   const chunks = normalized
-    .split(/(?<=[.!?。！？])\s+/)
+    .split(/(?<=[.!?])\s+/)
     .map((chunk) => chunk.trim())
     .filter(Boolean);
   const lines: string[] = [];
@@ -7626,7 +9547,7 @@ function readableTranslationLines(text: string) {
     } else {
       line = next;
     }
-    if (/[.!?。！？]$/.test(chunk) && line.length > 48) {
+    if (/[.!?]$/.test(chunk) && line.length > 48) {
       flush();
     }
   }
@@ -7635,19 +9556,10 @@ function readableTranslationLines(text: string) {
     if (item.length <= 110) {
       return [item];
     }
-    return item
-      .split(/(?<=[,;:])\s+/)
-      .reduce<string[]>((accumulator, part) => {
-        const last = accumulator[accumulator.length - 1] ?? "";
-        if (last && `${last} ${part}`.length <= 96) {
-          accumulator[accumulator.length - 1] = `${last} ${part}`;
-        } else {
-          accumulator.push(part);
-        }
-        return accumulator;
-      }, []);
+    return item.match(/.{1,100}(?:\s|$)/g)?.map((part) => part.trim()).filter(Boolean) ?? [item];
   });
 }
+
 
 function ReadableTranslationText(props: { text: string }) {
   return (
@@ -7672,6 +9584,7 @@ function TranslationSidecar(props: {
   autoTranslate: boolean;
   onSelectSentence: (id: string) => void;
   onRefresh: () => void;
+  onTranslatePage: () => void;
   onResizeStart: (event: React.PointerEvent) => void;
   onClose: () => void;
 }) {
@@ -7683,7 +9596,7 @@ function TranslationSidecar(props: {
 
   return (
     <aside className="translation-sidecar" aria-label={props.ui.translationPanel}>
-      <button className="panel-resizer left" title="Resize translation panel" onPointerDown={props.onResizeStart} />
+      <button className="panel-resizer right" title="Resize translation panel" onPointerDown={props.onResizeStart} />
       <div className="translation-head">
         <div className="auto-state">
           <span>{props.ui.auto}</span>
@@ -7693,6 +9606,9 @@ function TranslationSidecar(props: {
           {props.page} / {Math.max(1, props.pageCount)} · {props.translationLanguageName}
         </strong>
         <div className="translation-head-actions">
+          <button title={props.ui.translatePage} onClick={props.onTranslatePage}>
+            <Sparkles size={15} />
+          </button>
           <button title={props.ui.refreshTranslation} onClick={props.onRefresh}>
             <RefreshCw size={15} />
           </button>
@@ -7770,11 +9686,6 @@ function SelectionToolbarView(props: SelectionToolbarViewProps) {
         <span>{ui.comment}</span>
         <kbd>C</kbd>
       </button>
-      <button className="selection-row" onClick={props.onChat}>
-        <Bot size={15} />
-        <span>{ui.askAi}</span>
-        <kbd>Enter</kbd>
-      </button>
       <button className="selection-row" onClick={props.onCopyLatex}>
         <Copy size={15} />
         <span>{ui.copy}</span>
@@ -7816,7 +9727,6 @@ type RightPanelProps = {
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
   onRunBridge: () => void;
   onPollBridge: () => void;
-  onAutoHighlight: () => void;
   onStartRegionExplain: () => void;
   onUpdateAnnotation: (annotation: AnnotationRecord) => void;
   onDeleteAnnotation: (id: string) => void;
@@ -7828,6 +9738,7 @@ type RightPanelProps = {
   onDeleteCitation: (id: string) => void;
   onSaveCitation: (card: CitationCardRecord) => void;
   onSaveNote: (markdown: string) => Promise<void>;
+  onDeleteNote: () => Promise<void>;
   onMetadata: (field: keyof DocumentRecord, value: string | boolean | null) => void;
   onMoveFolder: (folderId: string) => void;
   onJsonExport: () => void;
@@ -7845,25 +9756,22 @@ function RightPanel(props: RightPanelProps) {
     <aside className="right-panel">
       <button className="panel-resizer left" title={ui.resizeRightPanel} onPointerDown={props.onResizeStart} />
       <div className="assistant-toolbar">
-        <button className={props.tab === "ai" && props.assistantMode === "study" ? "assistant-tool active" : "assistant-tool"} title={ui.studyTools} onClick={() => { props.setTab("ai"); props.setAssistantMode("study"); }}>
+        <button className={props.tab === "ai" && props.assistantMode === "study" ? "assistant-tool active" : "assistant-tool"} title={ui.studyTools} data-tooltip={ui.studyTools} aria-label={ui.studyTools} onClick={() => { props.setTab("ai"); props.setAssistantMode("study"); }}>
           <Sparkles size={17} />
         </button>
-        <button className={props.tab === "activity" ? "assistant-tool active" : "assistant-tool"} title={ui.highlights} onClick={() => props.setTab("activity")}>
+        <button className={props.tab === "activity" ? "assistant-tool active" : "assistant-tool"} title={ui.highlights} data-tooltip={ui.highlights} aria-label={ui.highlights} onClick={() => props.setTab("activity")}>
           <PenLine size={17} />
         </button>
-        <button className="assistant-tool" title={ui.imageExplanation} onClick={props.onStartRegionExplain}>
-          <Maximize2 size={17} />
-        </button>
-        <button className={props.tab === "ai" && props.assistantMode === "quotes" ? "assistant-tool active" : "assistant-tool"} title={ui.citationCards} onClick={() => { props.setTab("ai"); props.setAssistantMode("quotes"); }}>
+        <button className={props.tab === "ai" && props.assistantMode === "quotes" ? "assistant-tool active" : "assistant-tool"} title={ui.citationCards} data-tooltip={ui.citationCards} aria-label={ui.citationCards} onClick={() => { props.setTab("ai"); props.setAssistantMode("quotes"); }}>
           <Quote size={17} />
         </button>
-        <button className={props.tab === "notes" ? "assistant-tool active" : "assistant-tool"} title={ui.notes} onClick={() => props.setTab("notes")}>
+        <button className={props.tab === "notes" ? "assistant-tool active" : "assistant-tool"} title={ui.notes} data-tooltip={ui.notes} aria-label={ui.notes} onClick={() => props.setTab("notes")}>
           <MessageSquare size={17} />
         </button>
-        <button className={props.tab === "citations" ? "assistant-tool active" : "assistant-tool"} title={ui.citations} onClick={() => props.setTab("citations")}>
+        <button className={props.tab === "citations" ? "assistant-tool active" : "assistant-tool"} title={ui.citations} data-tooltip={ui.citations} aria-label={ui.citations} onClick={() => props.setTab("citations")}>
           <ListPlus size={17} />
         </button>
-        <button className="assistant-tool close" title={ui.close} onClick={props.onClose}>
+        <button className="assistant-tool close" title={ui.close} data-tooltip={ui.close} aria-label={ui.close} onClick={props.onClose}>
           <X size={17} />
         </button>
       </div>
@@ -7875,16 +9783,15 @@ function RightPanel(props: RightPanelProps) {
             pages={props.pages}
             annotations={props.annotations}
             aiResults={props.aiResults}
+            settings={props.settings}
             chatDraft={props.chatDraft}
             setChatDraft={props.setChatDraft}
             pageCursor={props.pageCursor}
             pageImages={props.pageImages}
             mode={props.assistantMode}
             onQueueTask={props.onQueueTask}
-            onRunBridge={props.onRunBridge}
-            onPollBridge={props.onPollBridge}
             onHoverSource={props.onHoverSource}
-            onStartRegionExplain={props.onStartRegionExplain}
+            onGoToPage={props.onGoToPage}
             onCopy={props.onCopy}
             onDeleteExplanation={props.onDeleteExplanation}
           />
@@ -7892,7 +9799,6 @@ function RightPanel(props: RightPanelProps) {
         {props.document && props.tab === "activity" && (
           <ActivityPanel
             annotations={props.annotations}
-            onAutoHighlight={props.onAutoHighlight}
             onUpdateAnnotation={props.onUpdateAnnotation}
             onDeleteAnnotation={props.onDeleteAnnotation}
             onDeleteAllAnnotations={props.onDeleteAllAnnotations}
@@ -7913,7 +9819,7 @@ function RightPanel(props: RightPanelProps) {
           />
         )}
         {props.document && props.tab === "notes" && (
-          <NotesPanel note={props.note} fullText={fullText} onSaveNote={props.onSaveNote} />
+          <NotesPanel note={props.note} fullText={fullText} onSaveNote={props.onSaveNote} onDeleteNote={props.onDeleteNote} />
         )}
         {props.document && props.tab === "info" && (
           <InfoPanel
@@ -7938,47 +9844,43 @@ function AiPanel(props: {
   pages: PageRecord[];
   annotations: AnnotationRecord[];
   aiResults: AiResultRecord[];
+  settings: Record<string, string>;
   chatDraft: string;
   setChatDraft: (value: string) => void;
   pageCursor: number;
   pageImages: Record<number, string>;
   mode: ReaderAssistantMode;
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
-  onRunBridge: () => void;
-  onPollBridge: () => void;
   onHoverSource: (value: string | null) => void;
-  onStartRegionExplain: () => void;
+  onGoToPage: (page: number) => void;
   onCopy: (text: string, label: string) => void;
   onDeleteExplanation: (result: AiResultRecord) => void;
 }) {
   const ui = useUiStrings();
-  const allCompleteText = props.aiResults
-    .filter(
-      (result) =>
-        result.status !== "pending" &&
-        !explanationTasks.has(result.taskType.toString()) &&
-        !rightPanelHiddenTasks.has(result.taskType.toString()),
-    )
-    .map((result) => getReadableAiOutput(result, ui))
-    .join("\n");
-  const keywordSeed = allCompleteText || props.pages.map((page) => page.text).join(" ");
-  const keywordChips = keywordChipsFromText(keywordSeed);
   return (
     <div className={props.mode === "quotes" ? "assistant-surface quote-mode" : "assistant-surface"}>
       {props.mode === "study" && (
-        <>
-          {aiDisplaySections.map((section) => (
-            <AiInsightSection
-              key={section.id}
-              section={section}
-              results={props.aiResults}
-              keywords={section.id === "keywords" ? keywordChips : []}
-              onQueueTask={props.onQueueTask}
-              pages={props.pages}
-              onCopy={props.onCopy}
-            />
-          ))}
-        </>
+        <div className="chat-panel">
+          <ChatThread
+            results={props.aiResults}
+            onHoverSource={props.onHoverSource}
+            onGoToPage={props.onGoToPage}
+            onCopy={props.onCopy}
+          />
+          <ChatComposer
+            value={props.chatDraft}
+            onChange={props.setChatDraft}
+            modelLabel={aiRuntimeLabel(props.settings, ui)}
+            onSend={() => {
+              const question = props.chatDraft.trim();
+              if (!question) {
+                return;
+              }
+              props.onQueueTask("chatWithPaper", { question });
+              props.setChatDraft("");
+            }}
+          />
+        </div>
       )}
       {props.mode === "quotes" && (
         <QuoteCardPanel
@@ -7990,39 +9892,66 @@ function AiPanel(props: {
           onDeleteExplanation={props.onDeleteExplanation}
         />
       )}
-      <ChatComposer
-        value={props.chatDraft}
-        onChange={props.setChatDraft}
-        onSend={() => {
-          const question = props.chatDraft.trim();
-          if (!question) {
-            return;
-          }
-          props.onQueueTask("chatWithPaper", { question });
-          props.setChatDraft("");
-        }}
-      />
-      <div className="bridge-controls">
-        <button onClick={props.onRunBridge}>
-          <Sparkles size={15} />
-          <span>{ui.agentRun}</span>
-        </button>
-        <button onClick={props.onPollBridge}>
-          <RefreshCw size={15} />
-          <span>{ui.refreshResults}</span>
-        </button>
-        <button onClick={props.onStartRegionExplain}>
-          <Maximize2 size={15} />
-          <span>{ui.imageRegion}</span>
-        </button>
-      </div>
-      <ResultList
-        results={props.aiResults}
-        onHoverSource={props.onHoverSource}
-        onCopy={props.onCopy}
-        onDeleteExplanation={props.onDeleteExplanation}
-      />
     </div>
+  );
+}
+
+function ChatThread(props: {
+  results: AiResultRecord[];
+  onHoverSource: (value: string | null) => void;
+  onGoToPage: (page: number) => void;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const ui = useUiStrings();
+  const chatResults = props.results
+    .filter((result) => {
+      const taskType = result.taskType.toString();
+      return taskType === "chatWithPaper" || (taskType === chatPlanTaskType && result.status === "pending");
+    })
+    .slice()
+    .sort((a, b) => {
+      const aTime = new Date(a.createdAt).getTime();
+      const bTime = new Date(b.createdAt).getTime();
+      return (Number.isNaN(aTime) ? 0 : aTime) - (Number.isNaN(bTime) ? 0 : bTime);
+    });
+  return (
+    <section className="chat-thread" aria-label={ui.askAi}>
+      {chatResults.length === 0 && (
+        <div className="chat-thread-empty">
+          <MessageSquareText size={20} />
+          <strong>{ui.askAi}</strong>
+          <span>{ui.askAnything}</span>
+        </div>
+      )}
+      {chatResults.map((result) => {
+        const isPending = result.status === "pending";
+        const answer = isPending ? ui.aiPendingAnswer : getReadableAiOutput(result, ui);
+        return (
+          <article key={result.id} className="chat-turn">
+            <div className="chat-bubble user">
+              <small>User</small>
+              <p>{result.inputText}</p>
+            </div>
+            <div
+              className={`chat-bubble assistant ${result.status}`}
+              onMouseEnter={() => props.onHoverSource(result.inputText)}
+              onMouseLeave={() => props.onHoverSource(null)}
+            >
+              <div className="chat-bubble-head">
+              <small>User</small>
+                <span>{formatResultTime(result.createdAt)}</span>
+                {!isPending && (
+                  <button title={ui.copy} onClick={() => props.onCopy(answer, ui.askAi)}>
+                    <Copy size={13} />
+                  </button>
+                )}
+              </div>
+              <FormattedAiText text={answer} onPageCitation={props.onGoToPage} />
+            </div>
+          </article>
+        );
+      })}
+    </section>
   );
 }
 
@@ -8090,7 +10019,7 @@ function QuoteCardPanel(props: {
 }) {
   const ui = useUiStrings();
   const quoteResults = props.results.filter((result) =>
-    ["explainText", "explainRegionImage", "citationReason", "externalLinkSummary", "chatWithPaper"].includes(result.taskType.toString()),
+    ["explainText", "explainRegionImage", "citationReason", "externalLinkSummary"].includes(result.taskType.toString()),
   );
   return (
     <section className="quote-card-panel">
@@ -8121,7 +10050,7 @@ function QuoteCardPanel(props: {
         >
           <div className="quote-avatar">Tt</div>
           <div>
-            <time>{[formatResultTime(result.createdAt), "Chat 0", pageLabel].filter(Boolean).join(" · ")}</time>
+            <time>{[formatResultTime(result.createdAt), "Chat 0", pageLabel].filter(Boolean).join(" / ")}</time>
             <h4>{taskTitle(result.taskType.toString(), ui)}</h4>
             <FormattedAiText text={getReadableAiOutput(result, ui)} compact={!isExplanation} />
           </div>
@@ -8143,12 +10072,13 @@ function QuoteCardPanel(props: {
   );
 }
 
-function ChatComposer(props: { value: string; onChange: (value: string) => void; onSend: () => void }) {
+function ChatComposer(props: { value: string; modelLabel: string; onChange: (value: string) => void; onSend: () => void }) {
   const ui = useUiStrings();
   return (
     <div className="assistant-composer">
       <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={ui.askAnything} />
       <div className="composer-footer">
+        <span className="composer-model-chip">{props.modelLabel}</span>
         <button className="send-round" title={ui.send} onClick={props.onSend}><Send size={15} /></button>
       </div>
     </div>
@@ -8237,13 +10167,13 @@ function autoDelimitOutlineMathSegment(segment: string) {
   addMatches(/\\[A-Za-z]+(?:\s*[_^]\s*(?:\{[^}]+\}|[A-Za-z0-9]+))*/g, (match) => match[0], 6);
   addMatches(/\bO\([^)]{1,36}\)/g, (match) => match[0], 6);
   addMatches(
-    /\b[A-Za-z][A-Za-z0-9]*(?:[_^](?:\{[^}]+\}|[A-Za-z0-9]+))+(?:\s*(?:[+\-*/=]|≤|≥|≈)\s*[A-Za-z0-9\\_{}^]+)*/g,
+    /\b[A-Za-z][A-Za-z0-9]*(?:[_^](?:\{[^}]+\}|[A-Za-z0-9]+))+(?:\s*(?:[+\-*/=]|<=|>=|=>)\s*[A-Za-z0-9\\_{}^]+)*/g,
     (match) => match[0],
     5,
   );
-  addMatches(/[Α-Ωα-ω](?:\s*[_^]\s*(?:\{[^}]+\}|[A-Za-z0-9]+))?/g, (match) => match[0], 4);
+  addMatches(/[\u0391-\u03A9\u03B1-\u03C9](?:\s*[_^]\s*(?:\{[^}]+\}|[A-Za-z0-9]+))?/g, (match) => match[0], 4);
   addMatches(
-    /\b[A-Za-z][A-Za-z0-9_{}^]*\s*(?:=|≤|≥|≈|<|>)\s*[A-Za-z0-9\\_{}^+\-*/().\s]{1,36}/g,
+    /\b[A-Za-z][A-Za-z0-9_{}^]*\s*(?:=|<=|>=|<|>)\s*[A-Za-z0-9\\_{}^+\-*/().\s]{1,36}/g,
     (match) => match[0].trim(),
     3,
   );
@@ -8297,7 +10227,40 @@ function OutlineTitleText(props: { text: string }) {
   );
 }
 
-function InlineMarkdownText(props: { text: string }) {
+function InlinePageCitationText(props: { text: string; onPageCitation?: (page: number) => void }) {
+  const ui = useUiStrings();
+  if (!props.onPageCitation) {
+    return <>{props.text}</>;
+  }
+  const chunks: ReactNode[] = [];
+  const pattern = /(\((?:p|page)\.?\s*(\d+)\)|\b(?:p|page)\.?\s*(\d+)\b)/gi;
+  let cursor = 0;
+  for (const match of props.text.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    const page = Number(match[2] ?? match[3]);
+    if (index > cursor) {
+      chunks.push(props.text.slice(cursor, index));
+    }
+    chunks.push(
+      <button
+        key={`${match[0]}-${index}`}
+        type="button"
+        className="page-citation-link"
+        title={ui.goToPage}
+        onClick={() => props.onPageCitation?.(page)}
+      >
+        {`(p. ${page})`}
+      </button>,
+    );
+    cursor = index + match[0].length;
+  }
+  if (cursor < props.text.length) {
+    chunks.push(props.text.slice(cursor));
+  }
+  return <>{chunks}</>;
+}
+
+function InlineMarkdownText(props: { text: string; onPageCitation?: (page: number) => void }) {
   const chunks: Array<{ value: string; strong: boolean }> = [];
   const pattern = /\*\*([^*]+(?:\*(?!\*)[^*]+)*)\*\*/g;
   let cursor = 0;
@@ -8320,16 +10283,20 @@ function InlineMarkdownText(props: { text: string }) {
     <>
       {chunks.map((chunk, index) =>
         chunk.strong ? (
-          <strong key={`${chunk.value}-${index}`}>{chunk.value}</strong>
+          <strong key={`${chunk.value}-${index}`}>
+            <InlinePageCitationText text={chunk.value} onPageCitation={props.onPageCitation} />
+          </strong>
         ) : (
-          <span key={`${chunk.value}-${index}`}>{chunk.value}</span>
+          <span key={`${chunk.value}-${index}`}>
+            <InlinePageCitationText text={chunk.value} onPageCitation={props.onPageCitation} />
+          </span>
         ),
       )}
     </>
   );
 }
 
-function InlineMathText(props: { text: string; inlineOnly?: boolean }) {
+function InlineMathText(props: { text: string; inlineOnly?: boolean; onPageCitation?: (page: number) => void }) {
   const chunks: Array<{ value: string; math: boolean; display?: boolean }> = [];
   const text = normalizeMathDelimiters(props.text);
   const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$)/g;
@@ -8355,7 +10322,7 @@ function InlineMathText(props: { text: string; inlineOnly?: boolean }) {
     chunks.push({ value: text.slice(cursor), math: false });
   }
   if (!chunks.some((chunk) => chunk.math)) {
-    return <InlineMarkdownText text={text} />;
+    return <InlineMarkdownText text={text} onPageCitation={props.onPageCitation} />;
   }
   return (
     <>
@@ -8364,7 +10331,7 @@ function InlineMathText(props: { text: string; inlineOnly?: boolean }) {
           <MathChunk key={`${chunk.value}-${index}`} value={chunk.value} display={chunk.display} />
         ) : (
           <span key={`${chunk.value}-${index}`}>
-            <InlineMarkdownText text={chunk.value} />
+            <InlineMarkdownText text={chunk.value} onPageCitation={props.onPageCitation} />
           </span>
         ),
       )}
@@ -8458,7 +10425,7 @@ function formattedAiBlocks(value: string): FormattedAiBlock[] {
   return blocks;
 }
 
-function FormattedAiLine(props: { line: string; index: number }) {
+function FormattedAiLine(props: { line: string; index: number; onPageCitation?: (page: number) => void }) {
   const normalizedLine = normalizeMathDelimiters(props.line);
   const displayMath =
     normalizedLine.match(/^\$\$([\s\S]+)\$\$$/) ??
@@ -8471,7 +10438,7 @@ function FormattedAiLine(props: { line: string; index: number }) {
   if (heading) {
     return (
       <h4 key={`${props.line}-${props.index}`}>
-        <InlineMathText text={heading[1]} />
+        <InlineMathText text={heading[1]} onPageCitation={props.onPageCitation} />
       </h4>
     );
   }
@@ -8481,30 +10448,30 @@ function FormattedAiLine(props: { line: string; index: number }) {
       <div key={`${props.line}-${props.index}`} className="numbered-line">
         <b>{numbered[1]}.</b>
         <span>
-          <InlineMathText text={numbered[2]} />
+          <InlineMathText text={numbered[2]} onPageCitation={props.onPageCitation} />
         </span>
       </div>
     );
   }
-  const bullet = normalizedLine.match(/^[-*•]\s+(.+)/);
+  const bullet = normalizedLine.match(/^[-*]\s+(.+)/);
   if (bullet) {
     return (
       <div key={`${props.line}-${props.index}`} className="bullet-line">
         <i />
         <span>
-          <InlineMathText text={bullet[1]} />
+          <InlineMathText text={bullet[1]} onPageCitation={props.onPageCitation} />
         </span>
       </div>
     );
   }
   return (
     <p key={`${props.line}-${props.index}`}>
-      <InlineMathText text={normalizedLine} />
+      <InlineMathText text={normalizedLine} onPageCitation={props.onPageCitation} />
     </p>
   );
 }
 
-function FormattedAiText(props: { text: string; compact?: boolean }) {
+function FormattedAiText(props: { text: string; compact?: boolean; onPageCitation?: (page: number) => void }) {
   const blocks = formattedAiBlocks(props.text);
   const lines: string[] = [];
   if (blocks.length === 0) {
@@ -8516,7 +10483,7 @@ function FormattedAiText(props: { text: string; compact?: boolean }) {
         block.kind === "math" ? (
           <MathChunk key={`math-${index}-${block.value}`} value={block.value} display />
         ) : (
-          <FormattedAiLine key={`text-${index}-${block.value}`} line={block.value} index={index} />
+          <FormattedAiLine key={`text-${index}-${block.value}`} line={block.value} index={index} onPageCitation={props.onPageCitation} />
         ),
       )}
       {lines.map((line, index) => {
@@ -8547,7 +10514,7 @@ function FormattedAiText(props: { text: string; compact?: boolean }) {
             </div>
           );
         }
-        const bullet = normalizedLine.match(/^[-*•]\s+(.+)/);
+        const bullet = normalizedLine.match(/^[-*]\s+(.+)/);
         if (bullet) {
           return (
             <div key={`${line}-${index}`} className="bullet-line">
@@ -8809,7 +10776,6 @@ function LinkPreviewModal(props: {
 
 function ActivityPanel(props: {
   annotations: AnnotationRecord[];
-  onAutoHighlight: () => void;
   onUpdateAnnotation: (annotation: AnnotationRecord) => void;
   onDeleteAnnotation: (id: string) => void;
   onDeleteAllAnnotations: () => void;
@@ -8824,10 +10790,6 @@ function ActivityPanel(props: {
   }, {});
   return (
     <div className="panel-stack">
-      <button className="wide-command" onClick={props.onAutoHighlight}>
-        <Sparkles size={16} />
-        <span>{ui.autoHighlightCurrentPage}</span>
-      </button>
       <button className="wide-command danger" onClick={props.onDeleteAllAnnotations} disabled={props.annotations.length === 0}>
         <Trash2 size={16} />
         <span>{ui.deleteAllHighlights}</span>
@@ -8841,7 +10803,7 @@ function ActivityPanel(props: {
               <div>
                 <strong>{ui.page} {annotation.page}</strong>
                 <p>{annotation.text}</p>
-                {annotation.comment && <small>{annotation.comment}</small>}
+              <small>User</small>
                 <div className="annotation-colors">
                   {highlightColors.map((color) => (
                     <button
@@ -8912,7 +10874,7 @@ function CitationsPanel(props: {
             </button>
           </div>
           <p>{card.authors}</p>
-          <small>{[card.year, card.doi, card.url].filter(Boolean).join(" | ")}</small>
+              <small>User</small>
           <div className="micro-actions">
             <button disabled={!card.url && !card.doi} onClick={() => openPaperUrl(card)}>{ui.openPaper}</button>
             {card.doi && <button onClick={() => openPaperUrl({ ...card, url: "" })}>DOI</button>}
@@ -8933,7 +10895,7 @@ function CitationsPanel(props: {
   );
 }
 
-function NotesPanel(props: { note: NoteRecord | null; fullText: string; onSaveNote: (markdown: string) => Promise<void> }) {
+function NotesPanel(props: { note: NoteRecord | null; fullText: string; onSaveNote: (markdown: string) => Promise<void>; onDeleteNote: () => Promise<void> }) {
   const ui = useUiStrings();
   const [draft, setDraft] = useState(props.note?.markdown ?? "");
   const [saveState, setSaveState] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
@@ -8966,19 +10928,30 @@ function NotesPanel(props: { note: NoteRecord | null; fullText: string; onSaveNo
         }}
         placeholder={ui.markdownNotes}
       />
-      <button className="wide-command" disabled={saveState === "saving"} onClick={() => void submitNote()}>
-        <Save size={16} />
-        <span>{saveState === "saving" ? ui.saving : ui.saveNote}</span>
-      </button>
+      <div className="note-actions">
+        <button className="wide-command" disabled={saveState === "saving"} onClick={() => void submitNote()}>
+          <Save size={16} />
+          <span>{saveState === "saving" ? ui.saving : ui.saveNote}</span>
+        </button>
+        <button
+          className="wide-command danger"
+          disabled={saveState === "saving" || (!props.note?.markdown && !draft)}
+          onClick={() => {
+            void props.onDeleteNote().then(() => {
+              setDraft("");
+              setSaveState("idle");
+            });
+          }}
+        >
+          <Trash2 size={16} />
+          <span>{ui.deleteNote}</span>
+        </button>
+      </div>
       <small className={saveState === "error" ? "note-save-status error" : "note-save-status"}>
         {saveState === "dirty" && ui.unsavedChanges}
         {saveState === "saved" && ui.saved}
         {saveState === "error" && ui.saveFailed}
       </small>
-      <div className="reference-preview">
-        <strong>{ui.extractedTextPreview}</strong>
-        <p>{props.fullText.slice(0, 800) || ui.renderPagesToExtract}</p>
-      </div>
     </div>
   );
 }
@@ -9084,10 +11057,14 @@ function SettingsView(props: {
   const claudeMissing = props.agentStatuses["claude-code"]?.installed === false;
   const providerStatusLabel =
     providerStatus?.installed === true ? props.ui.installed : providerStatus?.installed === false ? props.ui.notInstalled : props.ui.unknown;
-  const providerStatusMessage =
-    providerStatus?.message.includes("브라우저 프리뷰")
-      ? props.ui.browserPreviewStatus
-      : providerStatus?.message;
+  const providerStatusMessage = providerStatus?.installed === null ? props.ui.browserPreviewStatus : providerStatus?.message;
+  const selectedModel = aiModelForProvider(props.settings, provider);
+  const modelOptions = providerModelOptions[provider];
+  const selectedModelIsKnown = modelOptions.some((option) => option.value === selectedModel);
+  const setSelectedModel = (value: string) => {
+    props.onChange(providerModelSettingKey(provider), value);
+    props.onChange("aiModel", value);
+  };
   return (
     <section className="settings-view">
       <div className="settings-header">
@@ -9106,7 +11083,7 @@ function SettingsView(props: {
               props.onChange("language", event.target.value);
             }}
           >
-            <option value="ko">{props.uiLanguage === "ko" ? "한국어" : "Korean"}</option>
+            <option value="ko">Korean</option>
             <option value="en">English</option>
           </select>
         </label>
@@ -9153,17 +11130,16 @@ function SettingsView(props: {
           />
           <span>{props.ui.autoTranslate}</span>
         </label>
-        <label className="toggle-row">
-          <input
-            type="checkbox"
-            checked={props.settings.autoHighlight === "true"}
-            onChange={(event) => props.onChange("autoHighlight", String(event.target.checked))}
-          />
-          <span>{props.ui.autoHighlightCurrentPageSetting}</span>
-        </label>
         <label className="field">
           <span>{props.ui.aiProvider}</span>
-          <select value={normalizeAiProviderKind(props.settings.aiProvider)} onChange={(event) => props.onChange("aiProvider", event.target.value)}>
+          <select
+            value={provider}
+            onChange={(event) => {
+              const nextProvider = normalizeAiProviderKind(event.target.value);
+              props.onChange("aiProvider", nextProvider);
+              props.onChange("aiModel", aiModelForProvider(props.settings, nextProvider));
+            }}
+          >
             <option value="codex-cli">Codex CLI</option>
             <option value="claude-code">Claude Code{claudeMissing ? props.ui.claudeMissingSuffix : ""}</option>
             <option value="local-draft">Local draft</option>
@@ -9183,14 +11159,46 @@ function SettingsView(props: {
             </p>
           )}
         </label>
-        <label className="field">
+        <label className="field model-field">
           <span>{props.ui.model}</span>
+          <select
+            value={selectedModel}
+            disabled={provider === "local-draft"}
+            onChange={(event) => setSelectedModel(event.target.value)}
+          >
+            <option value="">{props.ui.providerDefault}</option>
+            {!selectedModelIsKnown && selectedModel && <option value={selectedModel}>Custom: {selectedModel}</option>}
+            {modelOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <input
-            placeholder={props.ui.providerDefault}
-            value={props.settings.aiModel || ""}
-            onChange={(event) => props.onChange("aiModel", event.target.value)}
+            className="model-custom-input"
+            placeholder="custom model id"
+            value={selectedModel}
+            disabled={provider === "local-draft"}
+            onChange={(event) => setSelectedModel(event.target.value)}
           />
         </label>
+        {provider === "codex-cli" && (
+          <label className="field">
+            <span>{props.ui.reasoningEffort || "Reasoning effort"}</span>
+            <select
+              value={selectedCodexReasoningEffort(props.settings)}
+              onChange={(event) => {
+                props.onChange("codexReasoningEffort", event.target.value);
+              }}
+            >
+              {codexReasoningEffortOptions.map((option) => (
+                <option key={option.value || "default"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="field">
           <span>{props.ui.bridgePath}</span>
           <input value={props.settings.bridgePath} onChange={(event) => props.onChange("bridgePath", event.target.value)} />

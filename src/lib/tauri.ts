@@ -46,6 +46,10 @@ function normalizeState(state: AppStateRecord): AppStateRecord {
       uiLanguage: state.settings.uiLanguage === "en" ? "en" : "ko",
       translationLanguage: state.settings.translationLanguage || "ko",
       aiProvider: normalizeAiProviderSetting(state.settings.aiProvider),
+      codexModel: state.settings.codexModel || "",
+      codexReasoningEffort: state.settings.codexReasoningEffort || "",
+      claudeModel: state.settings.claudeModel || "",
+      wordMeaningLookupEnabled: state.settings.wordMeaningLookupEnabled === "false" ? "false" : "true",
     },
     aiResults: state.aiResults.map((result) => ({
       ...result,
@@ -76,11 +80,15 @@ const emptyState: AppStateRecord = {
     autoHighlight: "false",
     aiProvider: "codex-cli",
     aiModel: "",
+    codexModel: "",
+    codexReasoningEffort: "",
+    claudeModel: "",
     bridgePath: "bridge",
     customPrompt: "",
     readerOutlineWidth: "220",
     readerTranslationWidth: "360",
     readerRightPanelWidth: "340",
+    wordMeaningLookupEnabled: "true",
   },
 };
 
@@ -302,6 +310,17 @@ export async function upsertNote(note: NoteRecord): Promise<NoteRecord> {
   return note;
 }
 
+export async function deleteNote(id: string): Promise<void> {
+  const invoke = await getInvoke();
+  if (invoke) {
+    await invoke("delete_note", { id });
+    return;
+  }
+  const state = loadBrowserState();
+  state.notes = state.notes.filter((item) => item.id !== id);
+  saveBrowserState(state);
+}
+
 export async function upsertCitationCard(citation: CitationCardRecord): Promise<CitationCardRecord> {
   const invoke = await getInvoke();
   if (invoke) {
@@ -401,6 +420,7 @@ export async function writeBridgeTask(
   documentId: string,
   provider: string,
   model: string | undefined,
+  reasoningEffort: string | undefined,
   providerSessionId: string | undefined,
   payload: Record<string, unknown>,
 ): Promise<BridgeTask> {
@@ -413,6 +433,7 @@ export async function writeBridgeTask(
       documentId,
       provider,
       model,
+      reasoningEffort,
       providerSessionId,
       payloadJson,
     });
@@ -423,6 +444,7 @@ export async function writeBridgeTask(
     documentId,
     provider,
     model,
+    reasoningEffort,
     providerSessionId,
     payload,
     createdAt: new Date().toISOString(),

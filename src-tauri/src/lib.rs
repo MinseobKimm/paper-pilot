@@ -123,6 +123,8 @@ pub struct AiResultRecord {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
     pub provider_session_id: Option<String>,
 }
 
@@ -177,6 +179,8 @@ pub struct BridgeTask {
     pub provider: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub provider_session_id: Option<String>,
     pub payload: Value,
@@ -410,8 +414,12 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         ("autoHighlight", "false"),
         ("aiProvider", "codex-cli"),
         ("aiModel", ""),
+        ("codexModel", ""),
+        ("codexReasoningEffort", ""),
+        ("claudeModel", ""),
         ("bridgePath", "bridge"),
         ("customPrompt", ""),
+        ("wordMeaningLookupEnabled", "true"),
     ];
     for (key, value) in defaults {
         conn.execute(
@@ -544,6 +552,7 @@ fn row_ai_result(row: &Row<'_>) -> rusqlite::Result<AiResultRecord> {
         created_at: row.get(6)?,
         provider: row.get(7)?,
         model: row.get(8)?,
+        reasoning_effort: None,
         provider_session_id: row.get(9)?,
     })
 }
@@ -1104,6 +1113,14 @@ fn upsert_note(app: AppHandle, note: NoteRecord) -> AppResult<NoteRecord> {
 }
 
 #[tauri::command]
+fn delete_note(app: AppHandle, id: String) -> AppResult<()> {
+    let conn = open_db(&app)?;
+    conn.execute("DELETE FROM notes WHERE id = ?1", params![id])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn upsert_citation_card(
     app: AppHandle,
     citation: CitationCardRecord,
@@ -1249,6 +1266,7 @@ fn write_bridge_task(
     document_id: String,
     provider: String,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     provider_session_id: Option<String>,
     payload_json: String,
 ) -> AppResult<BridgeTask> {
@@ -1265,6 +1283,7 @@ fn write_bridge_task(
         document_id,
         provider,
         model,
+        reasoning_effort,
         provider_session_id,
         payload,
         created_at: now(),
@@ -1641,6 +1660,11 @@ fn codex_args(
         .model
         .as_deref()
         .filter(|value| !value.trim().is_empty());
+    let reasoning_effort = task
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| matches!(*value, "none" | "low" | "medium" | "high" | "xhigh"));
     let session_id = task
         .provider_session_id
         .as_deref()
@@ -1656,6 +1680,10 @@ fn codex_args(
         if let Some(model) = model {
             args.push("--model".to_string());
             args.push(model.to_string());
+        }
+        if let Some(reasoning_effort) = reasoning_effort {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
         }
         if let Some(path) = image_path {
             args.push("--image".to_string());
@@ -1678,6 +1706,10 @@ fn codex_args(
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        args.push("-c".to_string());
+        args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
     }
     if let Some(path) = image_path {
         args.push("--image".to_string());
@@ -2340,6 +2372,7 @@ pub fn run() {
             delete_annotation,
             upsert_comment,
             upsert_note,
+            delete_note,
             upsert_citation_card,
             delete_citation_card,
             save_ai_result,

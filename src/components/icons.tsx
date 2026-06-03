@@ -101,6 +101,15 @@ export const Download = makeIcon(
   </>,
 );
 
+export const Eraser = makeIcon(
+  <>
+    <path d="m4.6 14.2 8.8-8.8c.8-.8 2-.8 2.8 0l2.4 2.4c.8.8.8 2 0 2.8l-7.1 7.1" />
+    <path d="m9.1 9.7 6.2 6.2" />
+    <path d="M4.6 14.2 8 17.6c.8.8 2 .8 2.8 0l.7-.7" />
+    <path d="M4.5 20h15" />
+  </>,
+);
+
 export const Eye = makeIcon(
   <>
     <path d="M3.8 12s3-5.3 8.2-5.3 8.2 5.3 8.2 5.3-3 5.3-8.2 5.3S3.8 12 3.8 12Z" />

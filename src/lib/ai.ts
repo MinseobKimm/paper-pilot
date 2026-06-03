@@ -49,6 +49,8 @@ export class AgentCliProvider implements AiProvider {
     const providerSessionId =
       typeof task.payload.providerSessionId === "string" ? task.payload.providerSessionId : undefined;
     const model = typeof task.payload.model === "string" ? task.payload.model : undefined;
+    const reasoningEffort =
+      typeof task.payload.reasoningEffort === "string" ? task.payload.reasoningEffort : undefined;
     const bridgePayload = bridgePayloadFor(task, prompt);
     const bridgeTask = await writeBridgeTask(
       this.bridgePath,
@@ -56,6 +58,7 @@ export class AgentCliProvider implements AiProvider {
       task.document.id,
       this.provider,
       model,
+      reasoningEffort,
       providerSessionId,
       bridgePayload,
     );
@@ -135,6 +138,11 @@ function providerLabel(provider: AiProviderKind): string {
 }
 
 function inputTextFor(payload: Record<string, unknown>): string {
+  if (Array.isArray(payload.words)) {
+    const words = payload.words.filter((word): word is string => typeof word === "string" && word.trim().length > 0);
+    const context = typeof payload.context === "string" && payload.context.trim() ? `\nContext: ${payload.context.trim()}` : "";
+    return `[word meanings: ${words.slice(0, 160).join(", ")}]${context}`;
+  }
   if (typeof payload.mode === "string" && Array.isArray(payload.pages)) {
     return `[summary: ${payload.mode}, ${payload.pages.length} extracted page(s)]`;
   }
@@ -183,6 +191,9 @@ const translationLanguageNames: Record<string, string> = {
   id: "Indonesian",
   ar: "Arabic",
 };
+
+const outlineJsonInstruction =
+  'Extract the document outline from the whole PDF text. Return ONLY JSON with this exact shape: {"outline":[{"number":"1.1","title":"1.1 Related Works","page":3,"level":1,"anchorText":"1.1 Related Works"}]}. Include only headings that explicitly start with numeric section labels such as 1, 1.1, 1.1.1. Exclude Abstract, References, appendix labels without a numeric section number, captions, equations, body sentences, citations, and invented summaries. Keep title text exactly as it appears in the PDF, in English if the PDF is English. Page must be the page where that heading begins. Sort by numeric section order.';
 
 function translationLanguageNameFromPayload(payload: Record<string, unknown>) {
   if (typeof payload.translationLanguageName === "string" && payload.translationLanguageName.trim()) {
@@ -504,7 +515,9 @@ export function buildAiPrompt(task: AiTask): string {
       : task.taskType === "chatWithPaper" || task.taskType === "explainRegionImage"
         ? 2800
         : task.taskType === "outlineDocument"
-          ? 70000
+          ? 120000
+          : task.taskType === "defineWordMeanings"
+            ? 22000
           : task.taskType === "summarizePaper"
             ? 5200
             : 6500;
@@ -516,10 +529,12 @@ export function buildAiPrompt(task: AiTask): string {
             const limit =
               task.taskType === "outlineDocument"
                 ? pages.length > 160
-                  ? 180
+                  ? 520
                   : pages.length > 80
-                    ? 260
-                    : 420
+                    ? 820
+                    : 1400
+                : task.taskType === "defineWordMeanings"
+                  ? 1400
                 : task.taskType === "summarizePaper"
                   ? 520
                   : 760;
@@ -547,6 +562,44 @@ export function buildAiPrompt(task: AiTask): string {
   const question = typeof task.payload.question === "string" ? compactText(task.payload.question, 3000) : "";
   const reference = typeof task.payload.reference === "string" ? compactText(task.payload.reference, 5000) : "";
   const url = typeof task.payload.url === "string" ? compactText(task.payload.url, 1000) : "";
+  const wordMeaningWords = Array.isArray(task.payload.words)
+    ? task.payload.words
+        .filter((word): word is string => typeof word === "string" && word.trim().length > 0)
+        .map((word) => compactText(word, 80))
+        .slice(0, 160)
+    : [];
+  const wordMeaningContext = typeof task.payload.context === "string" ? compactText(task.payload.context, 1600) : "";
+  const candidateTermText = Array.isArray(task.payload.candidateTerms)
+    ? task.payload.candidateTerms
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return "";
+          }
+          const record = item as Record<string, unknown>;
+          const term = typeof record.term === "string" ? compactText(record.term, 100) : "";
+          const kind = typeof record.kind === "string" ? compactText(record.kind, 20) : "";
+          const count = typeof record.count === "number" ? record.count : "";
+          const reason = typeof record.reason === "string" ? compactText(record.reason, 160) : "";
+          return term ? `- ${term}${kind ? ` (${kind}` : ""}${count !== "" ? `, freq=${count}` : ""}${kind ? ")" : ""}${reason ? `: ${reason}` : ""}` : "";
+        })
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const existingMeaningText = Array.isArray(task.payload.existingMeanings)
+    ? task.payload.existingMeanings
+        .map((item, index) => {
+          if (!item || typeof item !== "object") {
+            return "";
+          }
+          const record = item as Record<string, unknown>;
+          const meaning = typeof record.meaning === "string" ? compactText(record.meaning, 260) : "";
+          const context = typeof record.context === "string" ? compactText(record.context, 260) : "";
+          const title = typeof record.documentTitle === "string" ? compactText(record.documentTitle, 160) : "";
+          return meaning ? `${index + 1}. ${meaning}${title ? ` (${title})` : ""}${context ? ` - ${context}` : ""}` : "";
+        })
+        .filter(Boolean)
+        .join("\n")
+    : "";
   const customPrompt = typeof task.payload.customPrompt === "string" ? compactText(task.payload.customPrompt, 2000) : "";
   const targetLanguage = translationLanguageNameFromPayload(task.payload);
   const documentLine = `문서: ${task.document.title || "제목 없음"}${task.document.authors ? ` / 저자: ${task.document.authors}` : ""}${
@@ -558,7 +611,7 @@ export function buildAiPrompt(task: AiTask): string {
   const ragText = useRagContext && ragContext ? formatRagContextForPrompt(ragContext) : "";
   const ragInstruction =
     useRagContext && ragContext
-      ? "A local lexical fallback retrieval context is provided because the AI page planner was unavailable or unusable. Use it only as candidate evidence, cite pages inline like (p.3), and do not conclude evidence is insufficient until the provided excerpts have been checked."
+      ? "A local lexical fallback retrieval context is provided because the AI page planner was unavailable or unusable. Use it only as candidate evidence, cite pages inline like (p. 3), and do not conclude evidence is insufficient until the provided excerpts have been checked."
       : "";
   const chatEvidenceInstruction =
     task.taskType === "chatWithPaper"
@@ -568,7 +621,7 @@ export function buildAiPrompt(task: AiTask): string {
             askMode === "planned"
               ? "This is the second stage of a hybrid whole-paper search. Use the selected exact page texts as primary evidence; use the Document Context Pack and retrieval plan only as navigation context."
               : "This short PDF fits in context. Use the selected page texts as the full extracted paper text.",
-            "Cite factual claims with page markers like (p.12). Do not cite pages that are not present in the selected page text.",
+            "Cite factual claims with page markers in one consistent format: (p. 12). Do not cite pages that are not present in the selected page text.",
             "If the selected exact page texts do not contain enough evidence, say that after checking those pages, and mention which pages were checked.",
           ].join(" ")
         : ""
@@ -619,15 +672,17 @@ export function buildAiPrompt(task: AiTask): string {
       "문서 목차를 페이지 순서대로 최대 60개 항목으로 뽑아. PDF에 실제로 등장하는 섹션/하위섹션 소제목만 원문 언어 그대로 사용해. 제목을 한국어로 번역하거나 요약하거나 새로 만들지 마. 표/그래프 축 숫자, 수식, 본문 문장, 인용문, 참고문헌 조각은 절대 목차에 넣지 마. 각 줄은 반드시 '- p.페이지번호 원문소제목' 형식으로만 써. 페이지 번호는 오름차순이어야 하고, 소제목 외 설명 문장은 붙이지 마.",
     recommendPapers:
       "현재 문서와 폴더 주제에 이어서 읽을 만한 논문을 추천하고, 추천 이유를 붙여.",
+    defineWordMeanings:
+      'For each requested English word, infer the best Korean meaning in this paper context. Use the extracted PDF text, candidate signals, and the selected sentence/context when provided. If existing meanings are provided, do not rewrite or delete them; return only a new paper-context meaning that can be stored alongside them. Output only valid JSON with this exact shape: {"meanings":[{"word":"veracity","meaning":"진실성","context":"short Korean note about the paper-specific usage"}]}. Do not include Markdown fences.',
   };
 
   const structuredJsonReminder =
-    task.taskType === "translatePage" || task.taskType === "autoHighlight"
+    task.taskType === "translatePage" || task.taskType === "autoHighlight" || task.taskType === "defineWordMeanings"
       ? "중요: 설명, 코드블록, Markdown fence 없이 JSON 객체 하나만 출력해."
       : "";
   const languageAwareTaskInstruction =
     task.taskType === "chatWithPaper"
-      ? "Answer the user's question based only on the provided PDF evidence. Write the final answer in Korean and include page citations like (p.12) for claims grounded in the paper."
+      ? "Answer the user's question based only on the provided PDF evidence. Write the final answer in Korean and include page citations in one consistent format like (p. 12) for claims grounded in the paper."
       : task.taskType === "translateText"
       ? `Translate the selected text into natural ${targetLanguage}. Keep core paper concept terms in English exactly as written when they are model names, method names, task names, dataset/benchmark names, metrics, acronyms, named components, or field-specific technical keywords.`
       : task.taskType === "translatePage"
@@ -647,6 +702,7 @@ export function buildAiPrompt(task: AiTask): string {
     "원본 PDF와 아래 추출 텍스트를 근거로 사용해. 추출 텍스트는 페이지/문장 정렬을 위한 보조 입력이다.",
     `작업: ${task.taskType}`,
     languageAwareTaskInstruction,
+    task.taskType === "outlineDocument" ? outlineJsonInstruction : "",
     chatEvidenceInstruction,
     translationPairInstruction,
     ragInstruction,
@@ -655,6 +711,10 @@ export function buildAiPrompt(task: AiTask): string {
     customPrompt ? `사용자 추가 지시:\n${customPrompt}` : "",
     text ? `선택 텍스트:\n${text}` : "",
     sentenceText ? `문장 단위 입력:\n${sentenceText}` : "",
+    wordMeaningWords.length ? `Requested English words:\n${wordMeaningWords.join(", ")}` : "",
+    candidateTermText ? `Candidate term signals:\n${candidateTermText}` : "",
+    wordMeaningContext ? `Selected word context:\n${wordMeaningContext}` : "",
+    existingMeaningText ? `Existing saved meanings for this word:\n${existingMeaningText}` : "",
     question ? `사용자 질문:\n${question}` : "",
     reference ? `참고문헌/링크 정보:\n${reference}` : "",
     task.taskType === "chatWithPaper" && documentContextText ? documentContextText : "",
@@ -670,10 +730,11 @@ export function buildAiPrompt(task: AiTask): string {
     .join("\n\n");
 }
 
-function trimmedPagesForBridge(pages: PageRecord[]): PageRecord[] {
-  return pages.slice(0, 16).map((page) => ({
+function trimmedPagesForBridge(pages: PageRecord[], taskType?: AiTaskType | string): PageRecord[] {
+  const isOutline = taskType === "outlineDocument";
+  return (isOutline ? pages : pages.slice(0, 16)).map((page) => ({
     ...page,
-    text: compactText(page.text, 2200),
+    text: compactText(page.text, isOutline ? 4200 : 2200),
     outlineLabel: compactText(page.outlineLabel, 240),
   }));
 }
@@ -695,6 +756,15 @@ function bridgePayloadFor(task: AiTask, prompt: string): Record<string, unknown>
   if (typeof task.payload.reference === "string") payload.reference = compactText(task.payload.reference, 5000);
   if (typeof task.payload.url === "string") payload.url = task.payload.url;
   if (typeof task.payload.mode === "string") payload.mode = task.payload.mode;
+  if (Array.isArray(task.payload.words)) {
+    payload.words = task.payload.words
+      .filter((word): word is string => typeof word === "string" && word.trim().length > 0)
+      .map((word) => compactText(word, 80))
+      .slice(0, 160);
+  }
+  if (Array.isArray(task.payload.candidateTerms)) payload.candidateTerms = task.payload.candidateTerms;
+  if (typeof task.payload.context === "string") payload.context = compactText(task.payload.context, 1600);
+  if (Array.isArray(task.payload.existingMeanings)) payload.existingMeanings = task.payload.existingMeanings;
   if (typeof task.payload.page === "number") payload.page = task.payload.page;
   if (typeof task.payload.translationLanguage === "string") payload.translationLanguage = task.payload.translationLanguage;
   if (typeof task.payload.translationLanguageName === "string") payload.translationLanguageName = task.payload.translationLanguageName;
@@ -718,7 +788,7 @@ function bridgePayloadFor(task: AiTask, prompt: string): Record<string, unknown>
   if (ragContext) payload.ragContext = trimRagContextForBridge(ragContext);
   const pages = pagesFromPayload(task.payload);
   if (pages.length && task.taskType !== "chatWithPaper" && task.taskType !== "chatWithPaperPlan") {
-    payload.pages = trimmedPagesForBridge(pages);
+    payload.pages = trimmedPagesForBridge(pages, task.taskType);
   }
   return payload;
 }
@@ -733,6 +803,10 @@ export function localAiOutput(task: AiTask): string {
   const ragContext = ragContextFromPayload(task.payload);
   const selectedPageTexts = selectedPageTextsFromPayload(task.payload);
   const askMode = askModeFromPayload(task.payload);
+  const wordMeaningWords = Array.isArray(task.payload.words)
+    ? task.payload.words.filter((word): word is string => typeof word === "string" && word.trim().length > 0)
+    : [];
+  const wordMeaningContext = typeof task.payload.context === "string" ? task.payload.context : "";
   const terms = keywords(`${selectedText} ${pageText}`);
   const targetLanguage = translationLanguageNameFromPayload(task.payload);
 
@@ -819,6 +893,18 @@ export function localAiOutput(task: AiTask): string {
         `Query: ${typeof task.payload.query === "string" ? task.payload.query : task.document.title}`,
         "- The selected agent can turn this into the final recommendation list.",
       ].join("\n");
+    case "defineWordMeanings":
+      return JSON.stringify(
+        {
+          meanings: wordMeaningWords.slice(0, 120).map((word) => ({
+            word,
+            meaning: `${word}의 논문 맥락상 한국어 뜻`,
+            context: wordMeaningContext || "Local draft mode cannot infer the exact paper-specific nuance.",
+          })),
+        },
+        null,
+        2,
+      );
     case "explainRegionImage":
       return [
         "Region explanation queued",
