@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { AiResultRecord, AppStateRecord } from "../types";
 import { currentNote, documentPages } from "../lib/appState";
 import { aiOutlineVersion, documentOutlineVersionSettingKey, readerOutlineRows, type OutlineAnchor, type OutlineRow } from "../lib/outlines";
-import { documentTextLayoutModeFromSettings, horizontalScrollFromSettings } from "../lib/readerSettings";
+import { documentTextLayoutModeFromSettings, horizontalScrollFromSettings, pageTextLayoutModesFromSettings } from "../lib/readerSettings";
 import { translationLanguageNameFromSettings, uiLanguageFromSettings, uiStrings } from "../lib/uiStrings";
 import { currentTranslationUnitsForSelection, selectedSourceSentenceIds } from "../lib/readerDerived";
 import { extractDocumentTermCandidates, normalizeWordKey, parseStoredWordList, wordMeaningMapFromSettings } from "../lib/wordMeanings";
@@ -26,7 +26,25 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
     () => (activeDocument ? documentPages(input.state, activeDocument.id) : []),
     [activeDocument, input.state],
   );
+  const activePageNumbers = useMemo(
+    () =>
+      activePages.length
+        ? activePages.map((page) => page.pageNumber)
+        : activeDocument?.pageCount
+          ? Array.from({ length: activeDocument.pageCount }, (_, index) => index + 1)
+          : [],
+    [activeDocument?.pageCount, activePages],
+  );
   const activeDocumentTextLayoutMode = documentTextLayoutModeFromSettings(input.state.settings, input.activeDocumentId);
+  const activePageTextLayoutModes = useMemo(
+    () =>
+      pageTextLayoutModesFromSettings(
+        input.state.settings,
+        input.activeDocumentId,
+        activePageNumbers,
+      ),
+    [activePageNumbers, input.activeDocumentId, input.state.settings],
+  );
   const currentPage = useMemo(
     () => activePages.find((page) => page.pageNumber === input.pageCursor),
     [activePages, input.pageCursor],
@@ -97,6 +115,7 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
     activeDocument,
     activePages,
     activeDocumentTextLayoutMode,
+    activePageTextLayoutModes,
     currentPage,
     wordMeaningMap,
     activeDocumentWordList,

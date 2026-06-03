@@ -205,6 +205,18 @@ export function useLibraryController(input: LibraryControllerInput) {
     });
   }
 
+  async function renameDocumentTitle(document: DocumentRecord) {
+    const currentTitle = document.title || document.fileName.replace(/\.pdf$/i, "");
+    const title = window.prompt(`${input.ui.rename} ${input.ui.title}`, currentTitle)?.trim();
+    if (!title || title === document.title) {
+      return;
+    }
+    const updated = await updateDocument({ ...document, title, updatedAt: nowIso() });
+    input.patchState((draft) => {
+      draft.documents = draft.documents.map((item) => (item.id === updated.id ? updated : item));
+    });
+  }
+
   return {
     libraryQuery,
     setLibraryQuery,
@@ -224,5 +236,6 @@ export function useLibraryController(input: LibraryControllerInput) {
     deleteDocumentsFromLibrary,
     toggleLibraryDocumentSelection,
     toggleDocumentBookmark,
+    renameDocumentTitle,
   };
 }

@@ -59,6 +59,12 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     height: number;
   } | null>(null);
   const textSelectionGestureRef = useRef<TextSelectionGesture | null>(null);
+
+  function textLayoutModeForPage(page: HTMLElement | null): DocumentTextLayoutMode | "auto" {
+    const pageLayout = page?.dataset.textLayout;
+    return pageLayout === "single" || pageLayout === "two-column" ? pageLayout : activeDocumentTextLayoutMode || "auto";
+  }
+
   function handleReaderMouseUp(event?: ReactMouseEvent) {
     const selection = window.getSelection();
     const activeGesture = textSelectionGestureRef.current
@@ -105,8 +111,9 @@ export function useReaderSelection(input: ReaderSelectionInput) {
       return;
     }
     const gesture = activeGesture && activeGesture.pageElement === page ? activeGesture : undefined;
+    const layoutMode = textLayoutModeForPage(page);
     const pageBounds = page.getBoundingClientRect();
-    const textLayerSelection = selectionFromTextLayer(page, selection, rangeRects, gesture, activeDocumentTextLayoutMode || "auto");
+    const textLayerSelection = layoutMode === "single" ? null : selectionFromTextLayer(page, selection, rangeRects, gesture, layoutMode);
     const fallbackRects = rangeRects
       .filter((rect) => rect.right >= pageBounds.left && rect.left <= pageBounds.right && rect.bottom >= pageBounds.top && rect.top <= pageBounds.bottom)
       .map((rect) => ({
@@ -148,8 +155,10 @@ export function useReaderSelection(input: ReaderSelectionInput) {
       return;
     }
     setSelectionToolbar(toolbar);
-    setTextSelectionPreview({ page: toolbar.page, rects: toolbar.rects });
-    selection?.removeAllRanges();
+    setTextSelectionPreview(null);
+    if (layoutMode !== "single") {
+      selection?.removeAllRanges();
+    }
   }
 
   function getCanvasPoint(event: ReactMouseEvent) {
@@ -172,6 +181,13 @@ export function useReaderSelection(input: ReaderSelectionInput) {
         const textLayer = (event.target as Element | null)?.closest<HTMLElement>(".text-layer");
         const page = (textTarget ?? textLayer)?.closest<HTMLElement>(".pdf-page-shell");
         if (page) {
+          const layoutMode = textLayoutModeForPage(page);
+          if (layoutMode === "single") {
+            textSelectionGestureRef.current = null;
+            setSelectionToolbar(null);
+            setTextSelectionPreview(null);
+            return;
+          }
           event.preventDefault();
           setSelectionToolbar(null);
           textSelectionGestureRef.current = {
@@ -220,7 +236,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
         endY: event.clientY,
       };
       textSelectionGestureRef.current = nextGesture;
-      const toolbar = selectionFromTextLayer(nextGesture.pageElement, null, [], nextGesture, activeDocumentTextLayoutMode || "auto");
+      const toolbar = selectionFromTextLayer(nextGesture.pageElement, null, [], nextGesture, textLayoutModeForPage(nextGesture.pageElement));
       if (!toolbar || toolbar.rects.length === 0) {
         setTextSelectionPreview(null);
         return;

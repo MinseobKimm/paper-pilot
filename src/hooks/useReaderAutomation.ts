@@ -3,7 +3,13 @@ import type { AiResultRecord, AiTaskType, AppStateRecord, DocumentRecord, PageRe
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import { normalizeAiProviderKind } from "../lib/ai";
 import { aiOutlineVersion, documentOutlineVersionSettingKey, hasFreshPendingOutlineResult, outlinePagesForAi, parseAiOutlineRows } from "../lib/outlines";
-import { documentTextLayoutAiVersion, documentTextLayoutAiVersionSettingKey } from "../lib/readerSettings";
+import {
+  documentTextLayoutAiVersion,
+  documentTextLayoutAiVersionSettingKey,
+  pageTextLayoutConfidenceFromSettings,
+  pageTextLayoutModeFromSettings,
+  pageTextLayoutSourceSettingKey,
+} from "../lib/readerSettings";
 import {
   hasCompleteTranslationResultForPage,
   hasTranslationRequestForPage,
@@ -210,17 +216,47 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     if (versionCurrent || hasPendingLayout || documentLayoutRequestsRef.current.has(documentId)) {
       return;
     }
+    const layoutCandidates = activePages
+      .map((page) => {
+        const mode = pageTextLayoutModeFromSettings(state.settings, documentId, page.pageNumber);
+        const confidence = pageTextLayoutConfidenceFromSettings(state.settings, documentId, page.pageNumber);
+        const source = state.settings[pageTextLayoutSourceSettingKey(documentId, page.pageNumber)] || "";
+        return {
+          page: page.pageNumber,
+          mode: mode || "unknown",
+          confidence,
+          reason: source === "ai" ? "already AI-classified" : "local geometry confidence below threshold",
+          pageRecord: page,
+          source,
+        };
+      })
+      .filter((candidate) => candidate.source !== "ai" && (candidate.mode === "unknown" || candidate.confidence < 0.7))
+      .slice(0, 8);
+    if (layoutCandidates.length === 0) {
+      patchState((draft) => {
+        draft.settings[versionKey] = documentTextLayoutAiVersion;
+      });
+      void setSetting(versionKey, documentTextLayoutAiVersion);
+      return;
+    }
     let cancelled = false;
     documentLayoutRequestsRef.current.add(documentId);
     async function queueInitialLayoutClassification() {
-      const samplePages = activePages
-        .filter((page) => page.text.trim().length > 80)
-        .slice(0, 8);
+      const samplePages = layoutCandidates
+        .map((candidate) => candidate.pageRecord)
+        .filter((page) => page.text.trim().length > 80);
       if (samplePages.length === 0 || cancelled) {
         documentLayoutRequestsRef.current.delete(documentId);
         return;
       }
-      const queued = await queueTask("classifyDocumentLayout", { pages: samplePages }, { silent: true, keepPanel: true });
+      const queued = await queueTask(
+        "classifyDocumentLayout",
+        {
+          pages: samplePages,
+          layoutCandidates: layoutCandidates.map(({ pageRecord, ...candidate }) => candidate),
+        },
+        { silent: true, keepPanel: true },
+      );
       if (cancelled) {
         return;
       }

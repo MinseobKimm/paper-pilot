@@ -831,6 +831,22 @@ select:disabled {
   border-radius: 8px;
 }
 
+.pdf-page-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 612 / 792;
+  background: #fff;
+}
+
+.pdf-page-placeholder::after {
+  content: "";
+  width: 34%;
+  height: 1px;
+  border-radius: 999px;
+  background: rgba(76, 86, 112, 0.16);
+}
+
 .page-label {
   position: absolute;
   top: 8px;
@@ -1012,9 +1028,18 @@ select:disabled {
   user-select: none;
 }
 
+.pdf-page-shell.layout-single .text-layer span {
+  user-select: text;
+}
+
 .text-layer span::selection {
   color: transparent;
   background: transparent;
+}
+
+.pdf-page-shell.layout-single .text-layer span::selection {
+  color: transparent;
+  background: rgba(78, 137, 255, 0.28);
 }
 
 .pdf-stage.highlight-paint-mode .text-layer span::selection {

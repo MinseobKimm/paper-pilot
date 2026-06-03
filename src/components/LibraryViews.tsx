@@ -147,6 +147,7 @@ type LibraryManagerViewProps = {
   onMoveDocuments: (ids: string[], folderId: string) => void;
   onDeleteDocuments: (ids: string[]) => void;
   onToggleBookmark: (document: DocumentRecord) => void;
+  onRenameDocument: (document: DocumentRecord) => void;
 };
 
 export function LibraryManagerView(props: LibraryManagerViewProps) {
@@ -302,6 +303,16 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
                   />
                 </label>
                 <FileText size={20} />
+                <button
+                  className="bookmark-button"
+                  title={`${ui.rename} ${ui.title}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onRenameDocument(document);
+                  }}
+                >
+                  <PenLine size={18} />
+                </button>
                 <button
                   className="bookmark-button"
                   title={document.bookmarked ? ui.removeBookmark : ui.bookmark}

@@ -1,4 +1,4 @@
-import type { CSSProperties, Dispatch, MouseEvent, MouseEventHandler, PointerEvent, RefObject, SetStateAction } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type MouseEvent, type MouseEventHandler, type PointerEvent, type RefObject, type SetStateAction } from "react";
 import { EmptyReader } from "../LibraryViews";
 import { ReaderActionPalette, ReaderOutline, ReaderRail } from "../ReaderChrome";
 import { RightPanel, type ReaderAssistantMode } from "../panels/ReaderPanels";
@@ -6,7 +6,7 @@ import { setSetting, upsertAnnotation, deleteCitationCard, upsertCitationCard } 
 import { sentenceUnitsForPage, translationResultForPage, type TranslationUnit } from "../../lib/translations";
 import { wordMeaningLookupEnabled } from "../../lib/appState";
 import { wordMeaningLookupEnabledSettingKey, type WordPopup } from "../../lib/wordMeanings";
-import type { DocumentTextLayoutMode, SelectionToolbar } from "../../lib/pdfText";
+import type { DocumentTextLayoutMode, PageTextLayoutInference, SelectionToolbar } from "../../lib/pdfText";
 import type { OutlineAnchor, OutlineRow } from "../../lib/outlines";
 import type { PdfDocumentProxy } from "../../lib/pdfDocument";
 import type { PdfLinkPreviewTarget } from "../../lib/linkPreviews";
@@ -51,6 +51,7 @@ type ReaderWorkspaceProps = {
   activeOutlineId: string | null;
   activeDocumentWordList: string[];
   activeDocumentTextLayoutMode: DocumentTextLayoutMode | "";
+  activePageTextLayoutModes: Record<number, DocumentTextLayoutMode | "">;
   currentPage: PageRecord | undefined;
   currentTranslationUnits: TranslationUnit[];
   selectedSentenceId: string | null;
@@ -101,6 +102,7 @@ type ReaderWorkspaceProps = {
   onHandleRegionMouseMove: MouseEventHandler<HTMLDivElement>;
   onFinishRegionExplain: (event: MouseEvent<HTMLDivElement>) => void | Promise<void>;
   onCreatePageText: (page: PageRecord) => void;
+  onRememberPageTextLayout: (pageNumber: number, inference: PageTextLayoutInference) => void;
   onRememberOutlineAnchors: (pageNumber: number, rows: OutlineAnchor[]) => void;
   onRememberPageImage: (pageNumber: number, dataUrl: string) => void;
   onOpenExplanation: (annotation: AnnotationRecord) => void;
@@ -130,6 +132,74 @@ type ReaderWorkspaceProps = {
 export function ReaderWorkspace(props: ReaderWorkspaceProps) {
   const pageCount = props.pdfDocument?.numPages ?? props.activeDocument?.pageCount ?? 0;
   const autoTranslate = props.state.settings.autoTranslate === "true";
+  const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, index) => index + 1), [pageCount]);
+  const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
+  const estimatedPageWidth = Math.round(612 * props.zoom);
+  const estimatedPageHeight = Math.round(792 * props.zoom);
+
+  function nearbyPages(page: number) {
+    const pages: number[] = [];
+    for (let offset = -2; offset <= 3; offset += 1) {
+      const next = page + offset;
+      if (next >= 1 && next <= pageCount) {
+        pages.push(next);
+      }
+    }
+    return pages;
+  }
+
+  useEffect(() => {
+    if (!props.activeDocument || pageCount <= 0) {
+      setRenderedPages(new Set());
+      return;
+    }
+    setRenderedPages(new Set(nearbyPages(props.pageCursor)));
+  }, [props.activeDocument?.id, pageCount, props.zoom]);
+
+  useEffect(() => {
+    if (!props.activeDocument || pageCount <= 0) {
+      return;
+    }
+    const nextPages = nearbyPages(props.pageCursor);
+    setRenderedPages((current) => {
+      if (nextPages.every((page) => current.has(page))) {
+        return current;
+      }
+      const next = new Set(current);
+      nextPages.forEach((page) => next.add(page));
+      return next;
+    });
+  }, [props.activeDocument?.id, pageCount, props.pageCursor]);
+
+  useEffect(() => {
+    const root = props.readerRef.current;
+    if (!root || !props.activeDocument || pageCount <= 0) {
+      return;
+    }
+    const placeholders = Array.from(root.querySelectorAll<HTMLElement>(".pdf-page-placeholder"));
+    if (placeholders.length === 0) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visiblePages = entries
+          .filter((entry) => entry.isIntersecting)
+          .map((entry) => Number((entry.target as HTMLElement).dataset.page ?? 0))
+          .filter((page) => page > 0);
+        if (visiblePages.length === 0) {
+          return;
+        }
+        setRenderedPages((current) => {
+          const next = new Set(current);
+          visiblePages.forEach((page) => next.add(page));
+          return next.size === current.size ? current : next;
+        });
+      },
+      { root, rootMargin: "900px 0px" },
+    );
+    placeholders.forEach((placeholder) => observer.observe(placeholder));
+    return () => observer.disconnect();
+  }, [props.activeDocument?.id, pageCount, renderedPages, props.readerRef]);
 
   function toggleAutoTranslate() {
     const next = autoTranslate ? "false" : "true";
@@ -256,38 +326,57 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
         )}
         {props.pdfDocument &&
           props.activeDocument &&
-          Array.from({ length: props.pdfDocument.numPages }, (_, index) => index + 1).map((pageNumber) => (
-            <PdfPageView
-              key={`${props.activeDocument?.id}-${pageNumber}-${props.zoom}`}
-              pdf={props.pdfDocument!}
-              documentId={props.activeDocument!.id}
-              pageNumber={pageNumber}
-              zoom={props.zoom}
-              searchTerm={props.searchTerm}
-              referencePages={props.activePages}
-              annotations={props.activeAnnotations.filter((annotation) => annotation.page === pageNumber)}
-              hoverSource={props.hoverSource}
-              sentenceUnits={sentenceUnitsForPage(props.activePages.find((page) => page.pageNumber === pageNumber))}
-              selectedSentenceIds={props.selectedSentenceIds}
-              highlightEraseActive={props.markupTool.kind === "erase"}
-              selectionPreviewRects={
-                props.textSelectionPreview?.page === pageNumber
-                  ? props.textSelectionPreview.rects
-                  : props.selectionToolbar?.page === pageNumber
-                    ? props.selectionToolbar.rects
+          pageNumbers.map((pageNumber) => {
+            const textLayoutMode = props.activePageTextLayoutModes[pageNumber] || props.activeDocumentTextLayoutMode;
+            if (!renderedPages.has(pageNumber)) {
+              const pageLayoutClass =
+                textLayoutMode === "single" ? "layout-single" : textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";
+              return (
+                <div
+                  key={`${props.activeDocument?.id}-${pageNumber}-placeholder-${props.zoom}`}
+                  id={`page-${pageNumber}`}
+                  className={`pdf-page-shell pdf-page-placeholder ${pageLayoutClass}`}
+                  data-page={pageNumber}
+                  data-text-layout={textLayoutMode || "auto"}
+                  style={{ width: estimatedPageWidth, minHeight: estimatedPageHeight }}
+                >
+                  <div className="page-label">Page {pageNumber}</div>
+                </div>
+              );
+            }
+            return (
+              <PdfPageView
+                key={`${props.activeDocument?.id}-${pageNumber}-${props.zoom}`}
+                pdf={props.pdfDocument!}
+                documentId={props.activeDocument!.id}
+                pageNumber={pageNumber}
+                zoom={props.zoom}
+                searchTerm={props.searchTerm}
+                referencePages={props.activePages}
+                annotations={props.activeAnnotations.filter((annotation) => annotation.page === pageNumber)}
+                hoverSource={props.hoverSource}
+                sentenceUnits={sentenceUnitsForPage(props.activePages.find((page) => page.pageNumber === pageNumber))}
+                selectedSentenceIds={props.selectedSentenceIds}
+                highlightEraseActive={props.markupTool.kind === "erase"}
+                selectionPreviewRects={
+                  props.textSelectionPreview?.page === pageNumber
+                    ? props.textSelectionPreview.rects
                     : []
-              }
-              textLayoutMode={props.activeDocumentTextLayoutMode}
-              onWordSelect={props.onOpenWordMeaningPopup}
-              regionDrag={props.regionDrag}
-              onTextReady={props.onCreatePageText}
-              onOutlineReady={props.onRememberOutlineAnchors}
-              onImageReady={props.onRememberPageImage}
-              onOpenExplanation={props.onOpenExplanation}
-              onDeleteAnnotation={(id) => props.onDeleteAnnotationById(id)}
-              onPreviewLink={(target) => props.onOpenLinkPreview(target)}
-            />
-          ))}
+                }
+                textLayoutMode={textLayoutMode}
+                onTextLayoutReady={props.onRememberPageTextLayout}
+                onWordSelect={props.onOpenWordMeaningPopup}
+                regionDrag={props.regionDrag}
+                onTextReady={props.onCreatePageText}
+                onOutlineReady={props.onRememberOutlineAnchors}
+                onImageReady={props.onRememberPageImage}
+                captureImage={false}
+                onOpenExplanation={props.onOpenExplanation}
+                onDeleteAnnotation={(id) => props.onDeleteAnnotationById(id)}
+                onPreviewLink={(target) => props.onOpenLinkPreview(target)}
+              />
+            );
+          })}
       </div>
       {props.rightPanelOpen && (
         <RightPanel

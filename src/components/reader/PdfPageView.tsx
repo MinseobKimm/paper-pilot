@@ -3,7 +3,14 @@ import { Sparkles, X } from "../icons";
 import type { AnnotationRecord, HighlightRect, PageRecord } from "../../types";
 import type { PdfDocumentProxy } from "../../lib/pdfDocument";
 import { defaultReaderZoom } from "../../lib/readerSettings";
-import { dehyphenateLineBreaks, textBoxesFromPdfItems, type DocumentTextLayoutMode, type TextLayerBox } from "../../lib/pdfText";
+import {
+  dehyphenateLineBreaks,
+  inferPageTextLayoutFromPdfItems,
+  textBoxesFromPdfItems,
+  type DocumentTextLayoutMode,
+  type PageTextLayoutInference,
+  type TextLayerBox,
+} from "../../lib/pdfText";
 import { detectedOutlineAnchorsForPage, outlineAnchorDomId, type OutlineAnchor } from "../../lib/outlines";
 import { sentenceBounds, type SentenceUnit } from "../../lib/translations";
 import { referencePreviewTargetsForPage, type PdfLinkPreviewTarget } from "../../lib/linkPreviews";
@@ -25,6 +32,7 @@ type PdfPageViewProps = {
   highlightEraseActive: boolean;
   selectionPreviewRects: HighlightRect[];
   textLayoutMode: DocumentTextLayoutMode | "";
+  onTextLayoutReady: (pageNumber: number, inference: PageTextLayoutInference) => void;
   onWordSelect: (popup: WordPopup) => void;
   regionDrag: {
     page: number;
@@ -38,6 +46,7 @@ type PdfPageViewProps = {
   onTextReady: (page: PageRecord) => void;
   onOutlineReady: (pageNumber: number, anchors: OutlineAnchor[]) => void;
   onImageReady: (pageNumber: number, image: string) => void;
+  captureImage: boolean;
   onOpenExplanation: (annotation: AnnotationRecord) => void;
   onDeleteAnnotation: (id: string) => void;
   onPreviewLink: (target: PdfLinkPreviewTarget) => void;
@@ -169,10 +178,15 @@ export function PdfPageView(props: PdfPageViewProps) {
       if (cancelled) {
         return;
       }
-      props.onImageReady(props.pageNumber, canvas.toDataURL("image/png"));
+      if (props.captureImage) {
+        props.onImageReady(props.pageNumber, canvas.toDataURL("image/png"));
+      }
 
       const content = await page.getTextContent();
-      const extractedTextLayer = textBoxesFromPdfItems(content.items, viewport, props.zoom, props.textLayoutMode || "auto");
+      const layoutInference = inferPageTextLayoutFromPdfItems(content.items, viewport, props.zoom);
+      props.onTextLayoutReady(props.pageNumber, layoutInference);
+      const effectiveTextLayoutMode = props.textLayoutMode || layoutInference.mode || "auto";
+      const extractedTextLayer = textBoxesFromPdfItems(content.items, viewport, props.zoom, effectiveTextLayoutMode);
       const text =
         dehyphenateLineBreaks(extractedTextLayer.text) ||
         extractedTextLayer.text ||
@@ -305,9 +319,15 @@ export function PdfPageView(props: PdfPageViewProps) {
     })
     .filter(Boolean) as Array<{ annotation: AnnotationRecord; top: number; left: number }>;
   const previewTargets = [...referenceTargets, ...linkTargets];
+  const pageLayoutClass = props.textLayoutMode === "single" ? "layout-single" : props.textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";
 
   return (
-    <div id={`page-${props.pageNumber}`} className="pdf-page-shell" data-page={props.pageNumber}>
+    <div
+      id={`page-${props.pageNumber}`}
+      className={`pdf-page-shell ${pageLayoutClass}`}
+      data-page={props.pageNumber}
+      data-text-layout={props.textLayoutMode || "auto"}
+    >
       <div className="page-label">Page {props.pageNumber}</div>
       <canvas ref={canvasRef} />
       <div className={props.highlightEraseActive ? "highlight-layer erase-active" : "highlight-layer"}>

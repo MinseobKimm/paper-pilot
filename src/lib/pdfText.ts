@@ -39,6 +39,12 @@ export type TextLine = {
   boxes: TextLayerBox[];
 };
 
+export type PageTextLayoutInference = {
+  mode: DocumentTextLayoutMode;
+  confidence: number;
+  reason: string;
+};
+
 export type DocumentTextLayoutMode = "single" | "two-column";
 
 function cleanSelectedText(text: string) {
@@ -279,6 +285,67 @@ export function pageTextFromPdfItems(
   return items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
 }
 
+function cleanPdfTitleText(value: string) {
+  return value
+    .replace(/[\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\.pdf$/i, "")
+    .trim();
+}
+
+function isWeakPdfTitleCandidate(value: string) {
+  const text = cleanPdfTitleText(value);
+  const lower = text.toLowerCase();
+  if (text.length < 6 || text.length > 240) {
+    return true;
+  }
+  if (/^(abstract|introduction|references|bibliography|contents|keywords?)\b/i.test(text)) {
+    return true;
+  }
+  if (/\b(arxiv|doi|proceedings|conference|journal|workshop|preprint)\b/i.test(text) && text.length < 42) {
+    return true;
+  }
+  if (/^[\W\d_]+$/.test(text) || lower === "untitled" || lower === "document") {
+    return true;
+  }
+  return false;
+}
+
+export function inferPdfTitleFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+) {
+  const lines = textLinesFromBoxes(pdfItemTextBoxes(items, viewport, scale), "single")
+    .filter((line) => line.rect.top < viewport.height * 0.45)
+    .filter((line) => !isWeakPdfTitleCandidate(line.text));
+  if (lines.length === 0) {
+    return "";
+  }
+  const fontSizes = lines.map((line) => line.fontSize).sort((a, b) => a - b);
+  const medianFontSize = medianNumber(fontSizes);
+  const maxFontSize = Math.max(...fontSizes);
+  const titleMinFontSize = Math.max(medianFontSize * 1.16, maxFontSize * 0.76);
+  const titleLikeLines = lines.filter((line) => line.fontSize >= titleMinFontSize);
+  const pool = titleLikeLines.length ? titleLikeLines : lines.slice(0, 4);
+  const first = pool[0];
+  const firstIndex = lines.indexOf(first);
+  const group = [first];
+  for (const line of lines.slice(firstIndex + 1)) {
+    const previous = group[group.length - 1];
+    const gap = line.rect.top - (previous.rect.top + previous.rect.height);
+    if (gap > Math.max(18, previous.fontSize * 1.55) || line.fontSize < first.fontSize * 0.72) {
+      break;
+    }
+    group.push(line);
+    if (cleanPdfTitleText(group.map((item) => item.text).join(" ")).length > 180) {
+      break;
+    }
+  }
+  const title = cleanPdfTitleText(group.map((line) => line.text).join(" "));
+  return isWeakPdfTitleCandidate(title) ? "" : title;
+}
+
 export function closestTextLayerSpan(node: Node | null): HTMLElement | null {
   if (!node) {
     return null;
@@ -348,13 +415,15 @@ export function textLayerColumnInfo(
   };
 }
 
+type SelectableSpanItem = { span: HTMLElement; order: number; rect: DOMRect; column: number; fullWidth: boolean };
+
 function closestSpanToPoint(
-  items: Array<{ span: HTMLElement; order: number; rect: DOMRect; column: number; fullWidth: boolean }>,
+  items: SelectableSpanItem[],
   x: number,
   y: number,
-  column: number,
+  column?: number,
 ) {
-  const candidates = items.filter((item) => item.column === column || item.fullWidth);
+  const candidates = typeof column === "number" ? items.filter((item) => item.column === column || item.fullWidth) : items;
   const pool = candidates.length ? candidates : items;
   return pool
     .map((item) => {
@@ -363,6 +432,85 @@ function closestSpanToPoint(
       return { item, score: dx * dx + dy * dy };
     })
     .sort((a, b) => a.score - b.score || a.item.order - b.item.order)[0]?.item ?? null;
+}
+
+function spanRangeWithinVisualLines(
+  items: SelectableSpanItem[],
+  start: SelectableSpanItem,
+  end: SelectableSpanItem,
+  options: { gesture?: TextSelectionGesture; fullLinesForVerticalDrag?: boolean } = {},
+) {
+  if (items.length === 0) {
+    return [];
+  }
+  const sorted = [...items].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left || a.order - b.order);
+  const heights = sorted.map((item) => item.rect.height).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)] ?? 10;
+  const lineTolerance = Math.max(4, medianHeight * 0.8);
+  const lines: Array<{ index: number; top: number; bottom: number; centerY: number; items: SelectableSpanItem[] }> = [];
+  for (const item of sorted) {
+    const centerY = item.rect.top + item.rect.height / 2;
+    let line = lines[lines.length - 1];
+    if (!line || Math.abs(centerY - line.centerY) > lineTolerance) {
+      line = {
+        index: lines.length,
+        top: item.rect.top,
+        bottom: item.rect.bottom,
+        centerY,
+        items: [],
+      };
+      lines.push(line);
+    }
+    line.items.push(item);
+    line.top = Math.min(line.top, item.rect.top);
+    line.bottom = Math.max(line.bottom, item.rect.bottom);
+    line.centerY = (line.centerY * (line.items.length - 1) + centerY) / line.items.length;
+  }
+  const metas = lines.flatMap((line) =>
+    line.items
+      .sort((a, b) => a.rect.left - b.rect.left || a.order - b.order)
+      .map((item) => ({
+        ...item,
+        line: line.index,
+        centerX: item.rect.left + item.rect.width / 2,
+      })),
+  );
+  const startMeta = metas.find((item) => item.order === start.order);
+  const endMeta = metas.find((item) => item.order === end.order);
+  if (!startMeta || !endMeta) {
+    return [];
+  }
+  const forward =
+    startMeta.line < endMeta.line ||
+    (startMeta.line === endMeta.line && startMeta.centerX <= endMeta.centerX);
+  const first = forward ? startMeta : endMeta;
+  const last = forward ? endMeta : startMeta;
+  const verticalDrag =
+    options.fullLinesForVerticalDrag &&
+    options.gesture &&
+    first.line !== last.line &&
+    Math.abs(options.gesture.endY - options.gesture.startY) > Math.max(18, Math.abs(options.gesture.endX - options.gesture.startX) * 1.2);
+  return metas
+    .filter((item) => {
+      if (item.line < first.line || item.line > last.line) {
+        return false;
+      }
+      if (verticalDrag) {
+        return true;
+      }
+      if (first.line === last.line) {
+        return item.centerX >= first.centerX - 1 && item.centerX <= last.centerX + 1;
+      }
+      if (item.line === first.line) {
+        return item.centerX >= first.centerX - 1;
+      }
+      if (item.line === last.line) {
+        return item.centerX <= last.centerX + 1;
+      }
+      return true;
+    })
+    .sort((a, b) => a.line - b.line || a.rect.left - b.rect.left || a.order - b.order)
+    .map(({ span, order, rect }) => ({ span, order, rect }));
 }
 
 export function selectedSpansFromGesture(
@@ -376,7 +524,7 @@ export function selectedSpansFromGesture(
     return [];
   }
   const pageBounds = page.getBoundingClientRect();
-  const columnInfo = textLayerColumnInfo(spans, pageBounds, layoutMode);
+  const columnInfo = layoutMode !== "single" ? textLayerColumnInfo(spans, pageBounds, layoutMode) : null;
   const splitX = columnInfo?.splitX ?? pageBounds.left + pageBounds.width / 2;
   const columnForPoint = (x: number) => (x >= splitX ? 1 : 0);
   const columnForRect = (rect: DOMRect) => (rect.left + rect.width / 2 >= splitX ? 1 : 0);
@@ -403,6 +551,9 @@ export function selectedSpansFromGesture(
   if (!start || !end) {
     return [];
   }
+  if (!columnInfo) {
+    return spanRangeWithinVisualLines(items, start, end, { gesture, fullLinesForVerticalDrag: true });
+  }
   if (startColumn === endColumn) {
     const columnItems = items
       .filter((item) => item.column === startColumn && !item.fullWidth)
@@ -412,53 +563,7 @@ export function selectedSpansFromGesture(
     if (!columnStart || !columnEnd) {
       return [];
     }
-    const heights = columnItems.map((item) => item.rect.height).sort((a, b) => a - b);
-    const medianHeight = heights[Math.floor(heights.length / 2)] ?? 10;
-    const lineTolerance = Math.max(3, medianHeight * 0.65);
-    let activeLine = -1;
-    let activeCenterY = 0;
-    const lineItems = columnItems.map((item) => {
-      const centerY = item.rect.top + item.rect.height / 2;
-      if (activeLine < 0 || Math.abs(centerY - activeCenterY) > lineTolerance) {
-        activeLine += 1;
-        activeCenterY = centerY;
-      } else {
-        activeCenterY = (activeCenterY + centerY) / 2;
-      }
-      return {
-        ...item,
-        line: activeLine,
-        centerX: item.rect.left + item.rect.width / 2,
-      };
-    });
-    const startMeta = lineItems.find((item) => item.order === columnStart.order);
-    const endMeta = lineItems.find((item) => item.order === columnEnd.order);
-    if (!startMeta || !endMeta) {
-      return [];
-    }
-    const forward =
-      startMeta.line < endMeta.line ||
-      (startMeta.line === endMeta.line && startMeta.centerX <= endMeta.centerX);
-    const first = forward ? startMeta : endMeta;
-    const last = forward ? endMeta : startMeta;
-    return lineItems
-      .filter((item) => {
-        if (item.line < first.line || item.line > last.line) {
-          return false;
-        }
-        if (first.line === last.line) {
-          return item.centerX >= first.centerX - 1 && item.centerX <= last.centerX + 1;
-        }
-        if (item.line === first.line) {
-          return item.centerX >= first.centerX - 1;
-        }
-        if (item.line === last.line) {
-          return item.centerX <= last.centerX + 1;
-        }
-        return true;
-      })
-      .sort((a, b) => a.line - b.line || a.rect.left - b.rect.left || a.order - b.order)
-      .map(({ span, order, rect }) => ({ span, order, rect }));
+    return spanRangeWithinVisualLines(columnItems, columnStart, columnEnd);
   }
 
   const selected = items.filter((item) => {
@@ -536,7 +641,7 @@ export function selectionFromTextLayer(
     return null;
   }
   const pageBounds = page.getBoundingClientRect();
-  const columnInfo = textLayerColumnInfo(spans, pageBounds, layoutMode);
+  const columnInfo = layoutMode !== "single" ? textLayerColumnInfo(spans, pageBounds, layoutMode) : null;
   const anchorSpan = closestTextLayerSpan(selection?.anchorNode ?? null);
   const anchorColumn = columnInfo && anchorSpan ? columnInfo.columnFor(anchorSpan.getBoundingClientRect()) : null;
   const lockedColumn = columnInfo && anchorColumn !== null ? anchorColumn : null;
@@ -625,30 +730,84 @@ export function pdfItemTextBoxes(
 }
 
 export function inferTextLayoutModeFromBoxes(boxes: TextLayerBox[]): DocumentTextLayoutMode {
+  return inferPageTextLayoutFromBoxes(boxes).mode;
+}
+
+export function inferPageTextLayoutFromBoxes(boxes: TextLayerBox[]): PageTextLayoutInference {
   const lines = textLinesFromBoxes(boxes, "single");
   if (lines.length < 10) {
-    return "single";
+    return { mode: "single", confidence: 0.52, reason: "too few text lines for a confident column split" };
   }
   const minLeft = Math.min(...lines.map((line) => line.rect.left));
   const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
   const span = Math.max(1, maxRight - minLeft);
+  const pageLikeWidth = Math.max(span, Math.max(...boxes.map((box) => box.rect.left + box.rect.width)) - Math.min(...boxes.map((box) => box.rect.left)));
   const bodyLines = lines.filter((line) => {
     const width = line.rect.width;
     const center = line.rect.left + width / 2;
     return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
   });
+  const bodyBoxes = boxes.filter((box) => {
+    const text = box.text.trim();
+    if (!text || box.rect.width <= 1 || box.rect.height <= 1) {
+      return false;
+    }
+    const center = box.rect.left + box.rect.width / 2;
+    return center > minLeft + span * 0.04 && center < maxRight - span * 0.04;
+  });
   if (bodyLines.length < 8) {
-    return "single";
+    return {
+      mode: "single",
+      confidence: bodyBoxes.length > 80 ? 0.64 : 0.55,
+      reason: `few narrow body lines (${bodyLines.length})`,
+    };
   }
   const midpoint = minLeft + span / 2;
   const leftCount = bodyLines.filter((line) => line.rect.left + line.rect.width / 2 < midpoint).length;
   const rightCount = bodyLines.length - leftCount;
+  const balance = rightCount > 0 ? Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) : 0;
   if (leftCount < 4 || rightCount < 4 || Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) < 0.26) {
-    return "single";
+    return {
+      mode: "single",
+      confidence: Math.max(0.62, 0.82 - balance * 0.4),
+      reason: `unbalanced column candidates (${leftCount}/${rightCount})`,
+    };
   }
   const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
   const bestGap = centers.slice(1).reduce((best, center, index) => Math.max(best, center - centers[index]), 0);
-  return bestGap > Math.max(58, span * 0.11) ? "two-column" : "single";
+  const boxCenters = bodyBoxes.map((box) => box.rect.left + box.rect.width / 2).sort((a, b) => a - b);
+  const bestBoxGap = boxCenters.slice(1).reduce((best, center, index) => Math.max(best, center - boxCenters[index]), 0);
+  const gutterWidth = Math.max(24, pageLikeWidth * 0.045);
+  const gutterHits = bodyBoxes.filter((box) => box.rect.left <= midpoint + gutterWidth / 2 && box.rect.left + box.rect.width >= midpoint - gutterWidth / 2).length;
+  const gutterDensity = bodyBoxes.length ? gutterHits / bodyBoxes.length : 1;
+  const lineGapScore = bestGap / Math.max(1, span);
+  const boxGapScore = bestBoxGap / Math.max(1, span);
+  const hasLineColumnGap = bestGap > Math.max(44, span * 0.085);
+  const hasHugeLineGap = bestGap > Math.max(78, span * 0.15);
+  const hasBoxColumnGap = bestBoxGap > Math.max(32, span * 0.06);
+  const hasUsefulGutter = gutterDensity < 0.3;
+  const isBalanced = balance >= 0.42;
+  const hasEnoughBodyEvidence = bodyLines.length >= 14;
+  const twoColumnByLines = isBalanced && hasLineColumnGap && (hasEnoughBodyEvidence || hasHugeLineGap || hasUsefulGutter);
+  const twoColumnByBoxes = isBalanced && hasBoxColumnGap && hasUsefulGutter && bodyBoxes.length >= 40;
+  const mode = twoColumnByLines || twoColumnByBoxes ? "two-column" : "single";
+  const twoColumnScore =
+    (hasLineColumnGap ? 0.28 : 0) +
+    (hasHugeLineGap ? 0.12 : 0) +
+    (hasBoxColumnGap ? 0.12 : 0) +
+    (hasUsefulGutter ? 0.12 : 0) +
+    (hasEnoughBodyEvidence ? 0.12 : 0) +
+    Math.min(0.22, balance * 0.22) +
+    Math.min(0.12, Math.max(lineGapScore, boxGapScore) * 0.75);
+  const confidence =
+    mode === "two-column"
+      ? Math.max(0.55, Math.min(0.98, twoColumnScore))
+      : Math.max(0.55, Math.min(0.96, 1 - twoColumnScore * 0.65 + Math.min(0.08, gutterDensity)));
+  return {
+    mode,
+    confidence: Math.round(confidence * 100) / 100,
+    reason: `lines ${leftCount}/${rightCount}, balance ${balance.toFixed(2)}, line gap ${Math.round(bestGap)}, box gap ${Math.round(bestBoxGap)}, gutter ${(gutterDensity * 100).toFixed(1)}%`,
+  };
 }
 
 export function textLayoutModeFromPdfItems(
@@ -656,7 +815,15 @@ export function textLayoutModeFromPdfItems(
   viewport: { width: number; height: number; transform: number[] },
   scale: number,
 ): DocumentTextLayoutMode {
-  return inferTextLayoutModeFromBoxes(pdfItemTextBoxes(items, viewport, scale));
+  return inferPageTextLayoutFromPdfItems(items, viewport, scale).mode;
+}
+
+export function inferPageTextLayoutFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+): PageTextLayoutInference {
+  return inferPageTextLayoutFromBoxes(pdfItemTextBoxes(items, viewport, scale));
 }
 
 export function textBoxesFromPdfItems(
@@ -668,4 +835,3 @@ export function textBoxesFromPdfItems(
   const boxes = pdfItemTextBoxes(items, viewport, scale);
   return textAndBoxesFromOrderedLines(textLinesFromBoxes(boxes, layoutMode));
 }
-

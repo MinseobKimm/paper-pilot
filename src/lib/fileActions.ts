@@ -81,7 +81,10 @@ export function safeFileName(value: string, fallback = "paper-pilot-share") {
 }
 
 export function cleanSelection(text: string) {
-  return text.replace(/\s+/g, " ").trim();
+  return text
+    .replace(/([A-Za-z])-\s+([A-Za-z])/g, "$1$2")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function compactUiText(text: string, limit: number) {

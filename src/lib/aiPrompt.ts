@@ -329,6 +329,22 @@ export function buildAiPrompt(task: AiTask): string {
         .filter(Boolean)
         .join("\n")
     : "";
+  const layoutCandidateText = Array.isArray(task.payload.layoutCandidates)
+    ? task.payload.layoutCandidates
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return "";
+          }
+          const record = item as Record<string, unknown>;
+          const page = typeof record.page === "number" ? record.page : typeof record.pageNumber === "number" ? record.pageNumber : "";
+          const mode = typeof record.mode === "string" ? record.mode : "";
+          const confidence = typeof record.confidence === "number" ? record.confidence.toFixed(2) : "";
+          const reason = typeof record.reason === "string" ? compactText(record.reason, 260) : "";
+          return page ? `- page ${page}: local=${mode || "unknown"}${confidence ? ` confidence=${confidence}` : ""}${reason ? ` (${reason})` : ""}` : "";
+        })
+        .filter(Boolean)
+        .join("\n")
+    : "";
   const existingMeaningText = Array.isArray(task.payload.existingMeanings)
     ? task.payload.existingMeanings
         .map((item, index) => {
@@ -393,7 +409,7 @@ export function buildAiPrompt(task: AiTask): string {
     outlineDocument:
       "Extract the numeric section outline from the paper. The page text is already ordered left column top-to-bottom, then right column top-to-bottom for two-column PDFs. Include only headings that explicitly start with numeric labels such as 1, 1.1, or 1.1.1 and whose title begins with a word/letter after the number. Do not include table numeric rows, body sentences, equations, captions, citations, References, or speaker labels such as user/assistant/system.",
     classifyDocumentLayout:
-      'Classify the paper-wide reading layout for text selection and extraction. Decide whether the main body is mostly "single" column or "two-column" across the paper as a whole, ignoring title pages, full-width abstracts, figures, tables, and references. Return valid JSON only: {"layout":"single"|"two-column","reason":"short evidence"}',
+      'Classify each requested page layout for text selection. Use local geometry signals when provided, and use extracted text only as supporting context. Return valid JSON only: {"pages":[{"page":1,"layout":"single"|"two-column","reason":"short evidence"}],"layout":"single"|"two-column"}. "layout" is the majority body layout across the requested pages.',
     recommendPapers:
       "Recommend related papers or research directions in Korean based on the current document topic, with short reasons.",
     defineWordMeanings:
@@ -443,6 +459,7 @@ export function buildAiPrompt(task: AiTask): string {
     sentenceText ? `Sentence input:\n${sentenceText}` : "",
     wordMeaningWords.length ? `Requested English words:\n${wordMeaningWords.join(", ")}` : "",
     candidateTermText ? `Candidate term signals:\n${candidateTermText}` : "",
+    layoutCandidateText ? `Local page geometry signals:\n${layoutCandidateText}` : "",
     wordMeaningContext ? `Selected word context:\n${wordMeaningContext}` : "",
     existingMeaningText ? `Existing saved meanings for this word:\n${existingMeaningText}` : "",
     question ? `User question:\n${question}` : "",
@@ -490,6 +507,7 @@ export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, u
       .slice(0, 160);
   }
   if (Array.isArray(task.payload.candidateTerms)) payload.candidateTerms = task.payload.candidateTerms;
+  if (Array.isArray(task.payload.layoutCandidates)) payload.layoutCandidates = task.payload.layoutCandidates;
   if (typeof task.payload.context === "string") payload.context = compactText(task.payload.context, 1600);
   if (Array.isArray(task.payload.existingMeanings)) payload.existingMeanings = task.payload.existingMeanings;
   if (typeof task.payload.page === "number") payload.page = task.payload.page;
@@ -601,4 +619,3 @@ export function localAiOutput(task: AiTask): string {
       return "Task queued. A local draft is available only for known task types.";
   }
 }
-

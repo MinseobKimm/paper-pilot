@@ -4,7 +4,13 @@ import { makeId, nowIso } from "../lib/ids";
 import { selectedCodexReasoningEffort } from "../lib/aiPreferences";
 import { wordMeaningLookupEnabled } from "../lib/appState";
 import type { DocumentTextLayoutMode } from "../lib/pdfText";
-import { parseDocumentTextLayoutMode } from "../lib/readerSettings";
+import {
+  pageTextLayoutConfidenceSettingKey,
+  pageTextLayoutSettingKey,
+  pageTextLayoutSourceSettingKey,
+  parseDocumentTextLayoutMode,
+  parsePageTextLayoutModes,
+} from "../lib/readerSettings";
 import { setSetting } from "../lib/tauri";
 import { normalizeComparable } from "../lib/textUtils";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
@@ -168,6 +174,27 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
 
   async function saveDocumentLayoutFromResult(result: AiResultRecord) {
     if (result.taskType.toString() !== "classifyDocumentLayout" || result.status === "failed") {
+      return;
+    }
+    const pageModes = parsePageTextLayoutModes(result.outputText);
+    if (pageModes.length > 0) {
+      patchState((draft) => {
+        for (const page of pageModes) {
+          draft.settings[pageTextLayoutSettingKey(result.documentId, page.pageNumber)] = page.mode;
+          draft.settings[pageTextLayoutConfidenceSettingKey(result.documentId, page.pageNumber)] = "0.86";
+          draft.settings[pageTextLayoutSourceSettingKey(result.documentId, page.pageNumber)] = "ai";
+        }
+      });
+      await Promise.all(
+        pageModes.flatMap((page) => [
+          setSetting(pageTextLayoutSettingKey(result.documentId, page.pageNumber), page.mode),
+          setSetting(pageTextLayoutConfidenceSettingKey(result.documentId, page.pageNumber), "0.86"),
+          setSetting(pageTextLayoutSourceSettingKey(result.documentId, page.pageNumber), "ai"),
+        ]),
+      );
+      const twoColumnCount = pageModes.filter((page) => page.mode === "two-column").length;
+      const documentMode = twoColumnCount >= Math.max(1, Math.ceil(pageModes.length * 0.35)) ? "two-column" : "single";
+      await persistDocumentTextLayoutMode(result.documentId, documentMode);
       return;
     }
     const mode = parseDocumentTextLayoutMode(result.outputText);
