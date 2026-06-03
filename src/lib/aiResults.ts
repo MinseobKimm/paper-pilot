@@ -221,4 +221,3 @@ export function pageTextPreview(page: PageRecord | undefined, ui: UiStrings = ui
     .join(" ")
     .trim();
 }
-

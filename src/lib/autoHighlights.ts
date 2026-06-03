@@ -66,4 +66,3 @@ export function parseAutoHighlightCandidates(outputText: string, fallbackPage: n
       }));
   }
 }
-

@@ -84,4 +84,3 @@ export function aiRuntimeLabel(settings: Record<string, string>, ui: UiStrings) 
   const effort = normalizeAiProviderKind(settings.aiProvider) === "codex-cli" ? selectedCodexReasoningEffort(settings) : "";
   return effort ? `${providerDisplayName(settings.aiProvider)} / ${model} / ${effort}` : `${providerDisplayName(settings.aiProvider)} / ${model}`;
 }
-

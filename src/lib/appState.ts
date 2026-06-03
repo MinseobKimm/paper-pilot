@@ -64,4 +64,3 @@ export function inferYear(value = ""): string {
   const match = value.match(/(19|20)\d{2}/);
   return match?.[0] ?? "";
 }
-

@@ -598,4 +598,3 @@ export function translationLanguageLabel(value: string | undefined, uiLanguage: 
   const option = translationLanguageOption(value);
   return uiLanguage === "ko" ? option.ko : option.en;
 }
-

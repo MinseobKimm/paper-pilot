@@ -99,4 +99,3 @@ export function folderPathLabel(folders: FolderRecord[], folderId: string | null
   }
   return parts.length ? parts.join(" / ") : ui.libraryRoot;
 }
-

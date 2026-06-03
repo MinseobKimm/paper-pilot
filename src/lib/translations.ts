@@ -682,4 +682,3 @@ export function sentenceBounds(text: string, units: SentenceUnit[]) {
     return { id: unit.id, start, end };
   });
 }
-

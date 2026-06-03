@@ -23,4 +23,3 @@ export function isExplanationAnnotation(annotation: AnnotationRecord) {
 export function explanationResultId(annotation: AnnotationRecord) {
   return annotation.comment.startsWith("ai:") ? annotation.comment.slice(3) : "";
 }
-
