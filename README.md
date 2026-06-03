@@ -40,6 +40,15 @@ Paper readers usually stop at rendering pages. AI chat usually forgets where the
 
 * * *
 
+## ✨ Feature Highlights
+
+- Word meanings and technical terms: Paper Pilot can extract important English terms from the current paper, build Korean meanings with dictionary and agent support, and show a lightweight popup when you click a term. Words broken by PDF line hyphenation are normalized as one word where possible.
+- Page-aware text selection: each page can be treated as single-column or two-column, so single-column papers keep native browser selection while multi-column papers use a custom reading-order selection path.
+- Automatic paper naming: when a PDF is opened for the first time, the library tries to use the real paper title instead of the file name. You can still edit the title, author, year, abstract, folder, and bookmark state later.
+- Faster return to a paper: extracted page text, outline data, layout decisions, translations, word lists, zoom, and reading position are saved locally so reopening a known paper does less repeated work.
+- Outline, search, and link previews: the reader combines PDF/AI outline navigation, page search hits, citation/link previews, and page jump controls without leaving the document.
+- Translation beside the original: sentence-level page translation stays attached to the original page, with language and provider settings managed from the app.
+
 ## 🧠 What Paper Pilot Means
 
 Paper Pilot is not a generic document viewer with an AI button. It is a paper-reading workflow shaped around how research actually happens:
