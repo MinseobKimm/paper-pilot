@@ -251,8 +251,11 @@ fn decode_process_bytes(bytes: &[u8]) -> String {
     }
 }
 
+const LEGACY_LONG_COMMAND_MOJIBAKE: &str =
+    "\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd} \u{fffd}\u{02b9}\u{fffd} \u{fffd}\u{fffd}\u{03f4}\u{fffd}.";
+
 fn repair_legacy_mojibake(text: String) -> String {
-    if text.trim() == "�������� �ʹ� ��ϴ�." {
+    if text.trim() == LEGACY_LONG_COMMAND_MOJIBAKE {
         "명령줄이 너무 깁니다. 다시 실행하면 긴 프롬프트를 stdin으로 전달해 처리합니다.".to_string()
     } else {
         text
@@ -1599,6 +1602,30 @@ fn task_prompt(task: &BridgeTask) -> String {
     })
 }
 
+fn task_document_file_path(task: &BridgeTask) -> Option<PathBuf> {
+    task.payload
+        .get("document")
+        .and_then(|document| document.get("filePath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn push_codex_pdf_access_args(args: &mut Vec<String>, task: &BridgeTask) {
+    if task.task_type != "chatWithPaper" {
+        return;
+    }
+    let Some(pdf_path) = task_document_file_path(task) else {
+        return;
+    };
+    let Some(parent) = pdf_path.parent().filter(|path| !path.as_os_str().is_empty()) else {
+        return;
+    };
+    args.push("--add-dir".to_string());
+    args.push(parent.to_string_lossy().to_string());
+}
+
 fn image_extension(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" | "image/jpg" => "jpg",
@@ -1665,37 +1692,14 @@ fn codex_args(
         .as_deref()
         .map(str::trim)
         .filter(|value| matches!(*value, "none" | "low" | "medium" | "high" | "xhigh"));
-    let session_id = task
-        .provider_session_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let should_resume = task.task_type == "chatWithPaper" && session_id.is_some();
     let mut args = vec!["exec".to_string()];
-    if should_resume {
-        args.push("resume".to_string());
-        args.push("--json".to_string());
-        args.push("--skip-git-repo-check".to_string());
-        args.push("-o".to_string());
-        args.push(response_file.to_string_lossy().to_string());
-        if let Some(model) = model {
-            args.push("--model".to_string());
-            args.push(model.to_string());
-        }
-        if let Some(reasoning_effort) = reasoning_effort {
-            args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-        }
-        if let Some(path) = image_path {
-            args.push("--image".to_string());
-            args.push(path.to_string_lossy().to_string());
-        }
-        args.push(session_id.unwrap_or_default().to_string());
-        return args;
-    }
 
     args.extend([
         "--json".to_string(),
         "--skip-git-repo-check".to_string(),
+    ]);
+    push_codex_pdf_access_args(&mut args, task);
+    args.extend([
         "--sandbox".to_string(),
         "read-only".to_string(),
         "--cd".to_string(),
@@ -1785,9 +1789,33 @@ fn collect_text_parts(value: &Value) -> Vec<String> {
     parts
 }
 
+fn readable_agent_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+        {
+            return message.to_string();
+        }
+        if let Some(detail) = value.get("detail").and_then(Value::as_str) {
+            return detail.to_string();
+        }
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            return message.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn parse_codex_output(stdout: &str, response_file: &Path) -> (Option<String>, String) {
     let mut session_id = None;
     let mut messages = Vec::new();
+    let mut errors = Vec::new();
     for line in stdout
         .lines()
         .map(str::trim)
@@ -1807,6 +1835,26 @@ fn parse_codex_output(stdout: &str, response_file: &Path) -> (Option<String>, St
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
         }
+        if event_type == "error" {
+            if let Some(message) = event.get("message").and_then(Value::as_str) {
+                let message = readable_agent_error(message);
+                if !message.is_empty() {
+                    errors.push(message);
+                }
+            }
+        }
+        if event_type == "turn.failed" {
+            if let Some(message) = event
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+            {
+                let message = readable_agent_error(message);
+                if !message.is_empty() {
+                    errors.push(message);
+                }
+            }
+        }
         let Some(item) = event.get("item") else {
             continue;
         };
@@ -1822,6 +1870,11 @@ fn parse_codex_output(stdout: &str, response_file: &Path) -> (Option<String>, St
         .to_string();
     let content = if content.is_empty() {
         messages.join("\n\n").trim().to_string()
+    } else {
+        content
+    };
+    let content = if content.is_empty() && !errors.is_empty() {
+        errors.join("\n")
     } else {
         content
     };
@@ -2057,9 +2110,13 @@ fn run_agent_task(
         parse_codex_output(&stdout, &response_file)
     };
     let provider_session_id = new_session_id.or(task.provider_session_id.clone());
+    let saw_agent_error_event = task.provider == "codex-cli"
+        && stdout.lines().any(|line| {
+            line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"")
+        });
     let status = if exit_code == 0 && !content.trim().is_empty() {
         "complete"
-    } else if !content.trim().is_empty() {
+    } else if !content.trim().is_empty() && !saw_agent_error_event {
         "partial"
     } else {
         "failed"
@@ -2337,7 +2394,7 @@ mod tests {
     #[test]
     fn repairs_legacy_mojibake_message() {
         assert_eq!(
-            repair_legacy_mojibake("�������� �ʹ� ��ϴ�.".to_string()),
+            repair_legacy_mojibake(LEGACY_LONG_COMMAND_MOJIBAKE.to_string()),
             "명령줄이 너무 깁니다. 다시 실행하면 긴 프롬프트를 stdin으로 전달해 처리합니다."
         );
     }

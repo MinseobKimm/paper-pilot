@@ -978,14 +978,21 @@ select:disabled {
 .highlight-box {
   position: absolute;
   border-radius: 3px;
-  opacity: 0.36;
-  mix-blend-mode: multiply;
+  opacity: 0.24;
+  mix-blend-mode: normal;
 }
 
 .highlight-layer.erase-active .highlight-box {
   cursor: cell;
   pointer-events: auto;
-  opacity: 0.5;
+  opacity: 0.38;
+}
+
+.text-selection-preview-box {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(78, 137, 255, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(78, 137, 255, 0.32);
 }
 
 .region-selection-box {
@@ -1002,16 +1009,16 @@ select:disabled {
   line-height: 1;
   white-space: pre;
   transform-origin: 0 0;
-  user-select: text;
+  user-select: none;
 }
 
 .text-layer span::selection {
   color: transparent;
-  background: rgba(78, 205, 196, 0.34);
+  background: transparent;
 }
 
 .pdf-stage.highlight-paint-mode .text-layer span::selection {
-  background: rgba(246, 200, 95, 0.42);
+  background: transparent;
 }
 
 .text-layer .sentence-token {
@@ -1416,7 +1423,8 @@ select:disabled {
 }
 
 .word-meaning-empty button,
-.word-meaning-row button {
+.word-meaning-row button,
+.word-meaning-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1440,9 +1448,26 @@ select:disabled {
   margin: 0 0 4px;
   color: #152421;
   font-size: 15px;
-  font-weight: 800;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
+  font-weight: 650;
+  line-height: 1.55;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.word-meaning-row button {
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-color: #e2ddd4;
+  background: #fff8f5;
+  color: #a25444;
+}
+
+.word-meaning-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+  border-top: 1px solid #edf1ef;
 }
 
 [data-theme="ink"] .word-meaning-popover {
@@ -1457,6 +1482,16 @@ select:disabled {
   border-color: #314244;
   background: #182223;
   color: #eef4f1;
+}
+
+[data-theme="ink"] .word-meaning-actions {
+  border-top-color: #314244;
+}
+
+[data-theme="ink"] .word-meaning-row button {
+  border-color: #4a3430;
+  background: #2b1f1d;
+  color: #f0b5a8;
 }
 
 [data-theme="ink"] .word-meaning-row p {
@@ -1740,99 +1775,6 @@ select:disabled {
 
 .toolbar-popover-wrap {
   position: relative;
-}
-
-.auto-highlight-menu {
-  position: absolute;
-  top: 38px;
-  left: 0;
-  z-index: 80;
-  width: 260px;
-  padding: 14px;
-  border: 1px solid #cfcfd7;
-  border-radius: 8px;
-  background: #f7f7f9;
-  box-shadow: 0 16px 30px rgba(34, 31, 42, 0.18);
-}
-
-.menu-title-row,
-.palette-option,
-.palette-tags {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.menu-title-row {
-  justify-content: space-between;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #d8d8df;
-}
-
-.switch {
-  width: 44px;
-  height: 24px;
-  border-radius: 999px;
-  background: #bfc2c8;
-}
-
-.switch::after {
-  content: "";
-  display: block;
-  width: 18px;
-  height: 18px;
-  margin: 3px;
-  border-radius: 50%;
-  background: white;
-}
-
-.switch-button {
-  min-width: 44px;
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 999px;
-  background: #6c63ff;
-  color: #fff;
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.switch-button.off {
-  background: var(--muted);
-}
-
-.palette-list {
-  display: grid;
-  gap: 12px;
-  padding: 14px 0;
-}
-
-.palette-option input {
-  accent-color: #357dff;
-}
-
-.palette-swatches {
-  display: flex;
-  gap: 4px;
-}
-
-.palette-swatches i {
-  width: 14px;
-  height: 10px;
-  border-radius: 2px;
-}
-
-.auto-highlight-menu p {
-  color: #8a8793;
-  font-size: 12px;
-}
-
-.palette-tags span {
-  padding: 0 8px;
-  border-bottom: 2px solid;
-  color: #5d5968;
-  font-size: 11px;
 }
 
 .reader-grid {
@@ -2475,7 +2417,9 @@ select:disabled {
   gap: 8px;
   min-width: 0;
   color: #383541;
-  line-height: 1.62;
+  line-height: 1.72;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .formatted-ai.compact {
@@ -2496,13 +2440,15 @@ select:disabled {
 }
 
 .math-inline {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: visible;
-  padding: 0.1em 0.03em 0.16em;
-  line-height: 1.45;
-  vertical-align: -0.24em;
+  display: inline;
+  max-width: none;
+  overflow: visible;
+  padding: 0 0.04em;
+  line-height: normal;
+  vertical-align: baseline;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .math-block {
@@ -2519,7 +2465,11 @@ select:disabled {
 
 .math-inline .katex,
 .math-block .katex {
-  line-height: 1.35;
+  line-height: 1.18;
+}
+
+.math-inline .katex {
+  font-size: 1.02em;
 }
 
 .numbered-line,
@@ -3410,11 +3360,6 @@ select:disabled {
   line-height: 1;
 }
 
-.reader-action-palette .auto-highlight-menu {
-  top: 0;
-  left: 44px;
-}
-
 .study-dock {
   display: grid;
   grid-template-rows: minmax(220px, 0.44fr) minmax(280px, 0.56fr);
@@ -3911,7 +3856,7 @@ select:disabled {
 
 .pdf-stage.highlight-erase-mode .highlight-box {
   pointer-events: auto;
-  opacity: 0.55;
+  opacity: 0.3;
 }
 
 .pdf-stage.highlight-erase-mode .text-layer {

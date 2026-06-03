@@ -15,11 +15,11 @@ export type AiTaskType =
   | "translatePage"
   | "summarizePaper"
   | "chatWithPaper"
-  | "chatWithPaperPlan"
   | "autoHighlight"
   | "citationReason"
   | "externalLinkSummary"
   | "outlineDocument"
+  | "classifyDocumentLayout"
   | "recommendPapers"
   | "defineWordMeanings";
 
@@ -53,35 +53,6 @@ export type PageRecord = {
   outlineLabel: string;
 };
 
-export type RagHit = {
-  id: string;
-  documentId: string;
-  pageNumber: number;
-  chunkIndex: number;
-  text: string;
-  score: number;
-  matchedTerms: string[];
-};
-
-export type RagContext = {
-  query: string;
-  hits: RagHit[];
-  hitCount: number;
-  totalChunks: number;
-  hasStrongMatch: boolean;
-  maxChars: number;
-};
-
-export type AskMode = "direct" | "planned";
-
-export type AiRetrievalConfidence = "high" | "medium" | "low";
-
-export type AiRetrievalPlan = {
-  selectedPages: number[];
-  reason: string;
-  confidence: AiRetrievalConfidence;
-};
-
 export type DocumentPageCapsule = {
   pageNumber: number;
   outlineLabel: string;
@@ -105,12 +76,6 @@ export type DocumentContextPack = {
     source: string;
   }>;
   pages: DocumentPageCapsule[];
-};
-
-export type SelectedPageText = {
-  pageNumber: number;
-  text: string;
-  charCount: number;
 };
 
 export type AnnotationRecord = {

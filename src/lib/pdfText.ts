@@ -1,0 +1,671 @@
+import * as pdfjsLib from "pdfjs-dist";
+import type { HighlightRect } from "../types";
+
+export type PdfTextItem = { str?: string; transform?: number[]; fontName?: string; width?: number; height?: number };
+
+export type PdfTextViewport = { width: number; height: number; transform: number[] };
+
+export type SelectionToolbar = {
+  text: string;
+  page: number;
+  x: number;
+  y: number;
+  rects: HighlightRect[];
+};
+
+export type TextSelectionGesture = {
+  page: number;
+  pageElement: HTMLElement;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+};
+
+export type TextLayerBox = {
+  text: string;
+  start: number;
+  end: number;
+  rect: { left: number; top: number; width: number; height: number };
+  fontSize: number;
+  fontName: string;
+};
+
+export type TextLine = {
+  text: string;
+  rect: { left: number; top: number; width: number; height: number };
+  fontSize: number;
+  fontNames: string[];
+  boxes: TextLayerBox[];
+};
+
+export type DocumentTextLayoutMode = "single" | "two-column";
+
+function cleanSelectedText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function normalizeTextLayerText(value: string) {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?%])/g, "$1")
+    .replace(/([([{])\s+/g, "$1")
+    .replace(/\s+([)\]}])/g, "$1")
+    .trim();
+}
+
+export function medianNumber(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+}
+
+export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTextLayoutMode | "auto" = "auto") {
+  const sorted = [...boxes]
+    .filter((box) => box.text.trim())
+    .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  const groups: Array<{
+    boxes: TextLayerBox[];
+    top: number;
+    bottom: number;
+  }> = [];
+  for (const box of sorted) {
+    const midY = box.rect.top + box.rect.height / 2;
+    let existing: (typeof groups)[number] | undefined;
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      const group = groups[index];
+      const groupMid = (group.top + group.bottom) / 2;
+      const tolerance = Math.max(5, Math.min(box.rect.height, group.bottom - group.top) * 0.65);
+      if (Math.abs(groupMid - midY) <= tolerance) {
+        existing = group;
+        break;
+      }
+    }
+    if (existing) {
+      existing.boxes.push(box);
+      existing.top = Math.min(existing.top, box.rect.top);
+      existing.bottom = Math.max(existing.bottom, box.rect.top + box.rect.height);
+    } else {
+      groups.push({
+        boxes: [box],
+        top: box.rect.top,
+        bottom: box.rect.top + box.rect.height,
+      });
+    }
+  }
+  const lineRows = groups.flatMap((group) => {
+    const sortedBoxes = [...group.boxes].sort((a, b) => a.rect.left - b.rect.left);
+    const clusters: TextLayerBox[][] = [];
+    for (const box of sortedBoxes) {
+      const current = clusters[clusters.length - 1];
+      const previous = current?.[current.length - 1];
+      if (!current || !previous) {
+        clusters.push([box]);
+        continue;
+      }
+      const previousRight = previous.rect.left + previous.rect.width;
+      const gap = box.rect.left - previousRight;
+      const fontSize = Math.max(previous.fontSize, box.fontSize, 8);
+      const columnGap = Math.max(42, fontSize * 3.2);
+      if (gap > columnGap) {
+        clusters.push([box]);
+      } else {
+        current.push(box);
+      }
+    }
+    return clusters;
+  });
+  const lines = lineRows
+    .map((lineBoxes) => {
+      let text = "";
+      for (const [index, box] of lineBoxes.entries()) {
+        const previous = lineBoxes[index - 1];
+        if (!previous) {
+          text = box.text;
+          continue;
+        }
+        const previousRight = previous.rect.left + previous.rect.width;
+        const gap = box.rect.left - previousRight;
+        const tightJoin =
+          gap <= Math.max(4, Math.min(previous.fontSize, box.fontSize) * 0.28) ||
+          /^[,.;:!?%)}\]]/.test(box.text) ||
+          /[({\[]$/.test(previous.text);
+        text += tightJoin ? box.text : ` ${box.text}`;
+      }
+      const left = Math.min(...lineBoxes.map((box) => box.rect.left));
+      const top = Math.min(...lineBoxes.map((box) => box.rect.top));
+      const right = Math.max(...lineBoxes.map((box) => box.rect.left + box.rect.width));
+      const bottom = Math.max(...lineBoxes.map((box) => box.rect.top + box.rect.height));
+      return {
+        text: normalizeTextLayerText(text),
+        rect: {
+          left,
+          top,
+          width: right - left,
+          height: bottom - top,
+        },
+        fontSize: medianNumber(lineBoxes.map((box) => box.fontSize)),
+        fontNames: [...new Set(lineBoxes.map((box) => box.fontName).filter(Boolean))],
+        boxes: lineBoxes,
+      } satisfies TextLine;
+    })
+    .filter((line) => line.text.length > 0);
+  if (lines.length < 4 || layoutMode === "single") {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const minLeft = Math.min(...lines.map((line) => line.rect.left));
+  const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
+  const span = Math.max(1, maxRight - minLeft);
+  const bodyLines = lines.filter((line) => {
+    const width = line.rect.width;
+    const center = line.rect.left + width / 2;
+    return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
+  });
+  if (bodyLines.length < 4 && layoutMode !== "two-column") {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
+  let bestGap = 0;
+  let splitAt = -1;
+  for (let index = 1; index < centers.length; index += 1) {
+    const gap = centers[index] - centers[index - 1];
+    if (gap > bestGap) {
+      bestGap = gap;
+      splitAt = index;
+    }
+  }
+  const twoColumn = layoutMode === "two-column" || (splitAt > 0 && bestGap > Math.max(72, span * 0.16));
+  if (!twoColumn) {
+    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  }
+  const splitX = splitAt > 0 ? (centers[splitAt - 1] + centers[splitAt]) / 2 : minLeft + span / 2;
+  const isFullWidth = (line: TextLine) => line.rect.width > span * 0.72;
+  const columnFor = (line: TextLine) => {
+    return line.rect.left + line.rect.width / 2 >= splitX ? 1 : 0;
+  };
+  const sortSegment = (segment: TextLine[]) =>
+    segment.sort((a, b) => {
+      const columnA = columnFor(a);
+      const columnB = columnFor(b);
+      if (columnA !== columnB) {
+        return columnA - columnB;
+      }
+      return a.rect.top - b.rect.top || a.rect.left - b.rect.left;
+    });
+  const ordered: TextLine[] = [];
+  let segment: TextLine[] = [];
+  for (const line of [...lines].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)) {
+    if (isFullWidth(line)) {
+      ordered.push(...sortSegment(segment));
+      segment = [];
+      ordered.push(line);
+    } else {
+      segment.push(line);
+    }
+  }
+  ordered.push(...sortSegment(segment));
+  return ordered;
+}
+
+export function joinHyphenatedLineText(previous: string, next: string) {
+  const left = previous.trimEnd();
+  const right = next.trimStart();
+  if (/[A-Za-z]-$/.test(left) && /^[A-Za-z]/.test(right)) {
+    return `${left.slice(0, -1)}${right}`;
+  }
+  return `${left}\n${right}`;
+}
+
+export function textFromOrderedLines(lines: TextLine[]) {
+  return lines.reduce((text, line) => (text ? joinHyphenatedLineText(text, line.text) : line.text), "");
+}
+
+export function textAndBoxesFromOrderedLines(lines: TextLine[]) {
+  const text = textFromOrderedLines(lines);
+  const boxes: TextLayerBox[] = [];
+  let textCursor = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const previousLine = lineIndex > 0 ? lines[lineIndex - 1] : null;
+    const joinedHyphen = Boolean(previousLine && /[A-Za-z]-$/.test(previousLine.text.trimEnd()) && /^[A-Za-z]/.test(line.text.trimStart()));
+    if (lineIndex > 0 && !joinedHyphen) {
+      textCursor += 1;
+    }
+    let lineCursor = 0;
+    for (const [boxIndex, box] of line.boxes.entries()) {
+      const raw = box.text.trim();
+      if (!raw) {
+        continue;
+      }
+      const isHyphenatedLineEnd = boxIndex === line.boxes.length - 1 && /[A-Za-z]-$/.test(raw);
+      const indexText = isHyphenatedLineEnd ? raw.slice(0, -1) : raw;
+      const itemIndex = line.text.indexOf(raw, lineCursor);
+      const itemStart = textCursor + (itemIndex >= 0 ? itemIndex : lineCursor);
+      const itemEnd = itemStart + indexText.length;
+      lineCursor = (itemIndex >= 0 ? itemIndex : lineCursor) + raw.length;
+      boxes.push({
+        ...box,
+        text: raw,
+        start: itemStart,
+        end: itemEnd,
+      });
+    }
+    textCursor += line.text.length - (/[A-Za-z]-$/.test(line.text.trimEnd()) ? 1 : 0);
+  }
+  return { text, boxes };
+}
+
+export function dehyphenateLineBreaks(text: string) {
+  return text
+    .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function pageTextFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+  layoutMode: DocumentTextLayoutMode | "auto" = "auto",
+) {
+  const { text } = textBoxesFromPdfItems(items, viewport, scale, layoutMode);
+  const dehyphenated = dehyphenateLineBreaks(text);
+  if (dehyphenated) {
+    return dehyphenated;
+  }
+  return items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
+}
+
+export function closestTextLayerSpan(node: Node | null): HTMLElement | null {
+  if (!node) {
+    return null;
+  }
+  const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  return element?.closest<HTMLElement>(".text-layer [data-text]") ?? null;
+}
+
+function rectIntersectionArea(a: DOMRect, b: DOMRect) {
+  const width = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const height = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return width > 0 && height > 0 ? width * height : 0;
+}
+
+export function textLayerColumnInfo(
+  spans: HTMLElement[],
+  pageBounds: DOMRect,
+  layoutMode: DocumentTextLayoutMode | "auto" = "auto",
+) {
+  if (layoutMode === "single") {
+    return null;
+  }
+  const rects = spans
+    .map((span) => span.getBoundingClientRect())
+    .filter((rect) => rect.width > 1 && rect.height > 1);
+  if (rects.length < 8) {
+    return null;
+  }
+  const pageWidth = Math.max(1, pageBounds.width);
+  const bodyRects = rects.filter((rect) => rect.width < pageWidth * 0.62);
+  if (bodyRects.length < 8 && layoutMode !== "two-column") {
+    return null;
+  }
+  const centers = bodyRects.map((rect) => rect.left + rect.width / 2).sort((a, b) => a - b);
+  let bestGap = 0;
+  let splitAt = -1;
+  for (let index = 1; index < centers.length; index += 1) {
+    const gap = centers[index] - centers[index - 1];
+    if (gap > bestGap) {
+      bestGap = gap;
+      splitAt = index;
+    }
+  }
+  const midpoint = pageBounds.left + pageWidth / 2;
+  const leftCount = bodyRects.filter((rect) => rect.left + rect.width / 2 < midpoint).length;
+  const rightCount = bodyRects.length - leftCount;
+  if (layoutMode !== "two-column" && (splitAt <= 0 || bestGap < Math.max(48, pageWidth * 0.12))) {
+    const balancedColumns = leftCount >= 4 && rightCount >= 4 && Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) > 0.22;
+    if (!balancedColumns) {
+      return null;
+    }
+  }
+  const splitX = splitAt > 0 && bestGap >= Math.max(32, pageWidth * 0.06)
+    ? (centers[splitAt - 1] + centers[splitAt]) / 2
+    : midpoint;
+  return {
+    splitX,
+    columnFor(rect: DOMRect) {
+      return rect.left + rect.width / 2 >= splitX ? 1 : 0;
+    },
+    columnForPoint(x: number) {
+      return x >= splitX ? 1 : 0;
+    },
+    isFullWidth(rect: DOMRect) {
+      return rect.width > pageWidth * 0.66;
+    },
+  };
+}
+
+function closestSpanToPoint(
+  items: Array<{ span: HTMLElement; order: number; rect: DOMRect; column: number; fullWidth: boolean }>,
+  x: number,
+  y: number,
+  column: number,
+) {
+  const candidates = items.filter((item) => item.column === column || item.fullWidth);
+  const pool = candidates.length ? candidates : items;
+  return pool
+    .map((item) => {
+      const dx = x < item.rect.left ? item.rect.left - x : x > item.rect.right ? x - item.rect.right : 0;
+      const dy = y < item.rect.top ? item.rect.top - y : y > item.rect.bottom ? y - item.rect.bottom : 0;
+      return { item, score: dx * dx + dy * dy };
+    })
+    .sort((a, b) => a.score - b.score || a.item.order - b.item.order)[0]?.item ?? null;
+}
+
+export function selectedSpansFromGesture(
+  page: HTMLElement,
+  spans: HTMLElement[],
+  gesture: TextSelectionGesture,
+  layoutMode: DocumentTextLayoutMode | "auto" = "auto",
+): Array<{ span: HTMLElement; order: number; rect: DOMRect }> {
+  const dragDistance = Math.hypot(gesture.endX - gesture.startX, gesture.endY - gesture.startY);
+  if (dragDistance < 5) {
+    return [];
+  }
+  const pageBounds = page.getBoundingClientRect();
+  const columnInfo = textLayerColumnInfo(spans, pageBounds, layoutMode);
+  const splitX = columnInfo?.splitX ?? pageBounds.left + pageBounds.width / 2;
+  const columnForPoint = (x: number) => (x >= splitX ? 1 : 0);
+  const columnForRect = (rect: DOMRect) => (rect.left + rect.width / 2 >= splitX ? 1 : 0);
+  const items = spans
+    .map((span, order) => {
+      const rect = span.getBoundingClientRect();
+      const fullWidth = rect.width > pageBounds.width * 0.66;
+      return {
+        span,
+        order,
+        rect,
+        fullWidth,
+        column: fullWidth ? columnForRect(rect) : columnInfo?.columnFor(rect) ?? columnForRect(rect),
+      };
+    })
+    .filter((item) => item.rect.width > 1 && item.rect.height > 1);
+  if (items.length === 0) {
+    return [];
+  }
+  const startColumn = columnInfo?.columnForPoint(gesture.startX) ?? columnForPoint(gesture.startX);
+  const endColumn = columnInfo?.columnForPoint(gesture.endX) ?? columnForPoint(gesture.endX);
+  const start = closestSpanToPoint(items, gesture.startX, gesture.startY, startColumn);
+  const end = closestSpanToPoint(items, gesture.endX, gesture.endY, endColumn);
+  if (!start || !end) {
+    return [];
+  }
+  if (startColumn === endColumn) {
+    const columnItems = items
+      .filter((item) => item.column === startColumn && !item.fullWidth)
+      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left || a.order - b.order);
+    const columnStart = closestSpanToPoint(columnItems, gesture.startX, gesture.startY, startColumn);
+    const columnEnd = closestSpanToPoint(columnItems, gesture.endX, gesture.endY, endColumn);
+    if (!columnStart || !columnEnd) {
+      return [];
+    }
+    const heights = columnItems.map((item) => item.rect.height).sort((a, b) => a - b);
+    const medianHeight = heights[Math.floor(heights.length / 2)] ?? 10;
+    const lineTolerance = Math.max(3, medianHeight * 0.65);
+    let activeLine = -1;
+    let activeCenterY = 0;
+    const lineItems = columnItems.map((item) => {
+      const centerY = item.rect.top + item.rect.height / 2;
+      if (activeLine < 0 || Math.abs(centerY - activeCenterY) > lineTolerance) {
+        activeLine += 1;
+        activeCenterY = centerY;
+      } else {
+        activeCenterY = (activeCenterY + centerY) / 2;
+      }
+      return {
+        ...item,
+        line: activeLine,
+        centerX: item.rect.left + item.rect.width / 2,
+      };
+    });
+    const startMeta = lineItems.find((item) => item.order === columnStart.order);
+    const endMeta = lineItems.find((item) => item.order === columnEnd.order);
+    if (!startMeta || !endMeta) {
+      return [];
+    }
+    const forward =
+      startMeta.line < endMeta.line ||
+      (startMeta.line === endMeta.line && startMeta.centerX <= endMeta.centerX);
+    const first = forward ? startMeta : endMeta;
+    const last = forward ? endMeta : startMeta;
+    return lineItems
+      .filter((item) => {
+        if (item.line < first.line || item.line > last.line) {
+          return false;
+        }
+        if (first.line === last.line) {
+          return item.centerX >= first.centerX - 1 && item.centerX <= last.centerX + 1;
+        }
+        if (item.line === first.line) {
+          return item.centerX >= first.centerX - 1;
+        }
+        if (item.line === last.line) {
+          return item.centerX <= last.centerX + 1;
+        }
+        return true;
+      })
+      .sort((a, b) => a.line - b.line || a.rect.left - b.rect.left || a.order - b.order)
+      .map(({ span, order, rect }) => ({ span, order, rect }));
+  }
+
+  const selected = items.filter((item) => {
+    if (item.fullWidth) {
+      return false;
+    }
+    if (startColumn === 0 && endColumn === 1) {
+      return (item.column === 0 && item.order >= start.order) || (item.column === 1 && item.order <= end.order);
+    }
+    if (startColumn === 1 && endColumn === 0) {
+      return (item.column === 1 && item.order >= start.order) || (item.column === 0 && item.order <= end.order);
+    }
+    return false;
+  });
+  return selected.map(({ span, order, rect }) => ({ span, order, rect }));
+}
+
+export function joinSelectedSpanTexts(spans: HTMLElement[]) {
+  let output = "";
+  for (const span of spans) {
+    const raw = (span.dataset.text ?? "").trim();
+    if (!raw) {
+      continue;
+    }
+    if (!output) {
+      output = raw;
+      continue;
+    }
+    if (/[A-Za-z]-$/.test(output.trimEnd()) && /^[A-Za-z]/.test(raw)) {
+      output = `${output.trimEnd().slice(0, -1)}${raw}`;
+    } else if (/^[,.;:!?%)}\]]/.test(raw)) {
+      output += raw;
+    } else {
+      output += ` ${raw}`;
+    }
+  }
+  return cleanSelectedText(output);
+}
+
+export function mergeSelectionRects(rects: HighlightRect[]) {
+  const sorted = rects
+    .slice()
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  const merged: HighlightRect[] = [];
+  for (const rect of sorted) {
+    const previous = merged[merged.length - 1];
+    if (
+      previous &&
+      Math.abs(previous.y - rect.y) <= Math.max(3, Math.min(previous.height, rect.height) * 0.35) &&
+      Math.abs(previous.height - rect.height) <= Math.max(4, Math.max(previous.height, rect.height) * 0.4) &&
+      rect.x <= previous.x + previous.width + 10
+    ) {
+      const right = Math.max(previous.x + previous.width, rect.x + rect.width);
+      const bottom = Math.max(previous.y + previous.height, rect.y + rect.height);
+      previous.x = Math.min(previous.x, rect.x);
+      previous.y = Math.min(previous.y, rect.y);
+      previous.width = right - previous.x;
+      previous.height = bottom - previous.y;
+    } else {
+      merged.push({ ...rect });
+    }
+  }
+  return merged;
+}
+
+export function selectionFromTextLayer(
+  page: HTMLElement,
+  selection: Selection | null,
+  rangeRects: DOMRect[],
+  gesture?: TextSelectionGesture,
+  layoutMode: DocumentTextLayoutMode | "auto" = "auto",
+): SelectionToolbar | null {
+  const spans = Array.from(page.querySelectorAll<HTMLElement>(".text-layer [data-text]"));
+  if (spans.length === 0 || (rangeRects.length === 0 && !gesture)) {
+    return null;
+  }
+  const pageBounds = page.getBoundingClientRect();
+  const columnInfo = textLayerColumnInfo(spans, pageBounds, layoutMode);
+  const anchorSpan = closestTextLayerSpan(selection?.anchorNode ?? null);
+  const anchorColumn = columnInfo && anchorSpan ? columnInfo.columnFor(anchorSpan.getBoundingClientRect()) : null;
+  const lockedColumn = columnInfo && anchorColumn !== null ? anchorColumn : null;
+  const gestureSpans = gesture && gesture.pageElement === page ? selectedSpansFromGesture(page, spans, gesture, layoutMode) : [];
+  const selectedSpans = (gestureSpans.length
+    ? gestureSpans
+    : spans
+        .map((span, order) => ({ span, order, rect: span.getBoundingClientRect() }))
+        .filter(({ rect }) => {
+          if (rect.width <= 1 || rect.height <= 1) {
+            return false;
+          }
+          if (lockedColumn !== null && columnInfo && !columnInfo.isFullWidth(rect) && columnInfo.columnFor(rect) !== lockedColumn) {
+            return false;
+          }
+          const area = rect.width * rect.height;
+          return rangeRects.some((rangeRect) => {
+            const intersection = rectIntersectionArea(rect, rangeRect);
+            return intersection > Math.min(area, rangeRect.width * rangeRect.height) * 0.08;
+          });
+        }))
+    .sort((a, b) => a.order - b.order);
+  if (selectedSpans.length === 0) {
+    return null;
+  }
+  const text = joinSelectedSpanTexts(selectedSpans.map((item) => item.span));
+  if (text.length < 2) {
+    return null;
+  }
+  const rects = mergeSelectionRects(
+    selectedSpans.map(({ rect }) => ({
+      x: Math.max(0, Math.round((rect.left - pageBounds.left) * 10) / 10),
+      y: Math.max(0, Math.round((rect.top - pageBounds.top) * 10) / 10),
+      width: Math.max(1, Math.round(rect.width * 10) / 10),
+      height: Math.max(1, Math.round(rect.height * 10) / 10),
+      basisWidth: Math.round(pageBounds.width * 10) / 10,
+      basisHeight: Math.round(pageBounds.height * 10) / 10,
+    })),
+  );
+  if (rects.length === 0) {
+    return null;
+  }
+  const left = Math.min(...selectedSpans.map((item) => item.rect.left));
+  const top = Math.min(...selectedSpans.map((item) => item.rect.top));
+  const right = Math.max(...selectedSpans.map((item) => item.rect.right));
+  return {
+    text,
+    page: Number(page.dataset.page ?? "1"),
+    x: (left + right) / 2,
+    y: Math.max(72, top - 46),
+    rects,
+  };
+}
+
+
+export function pdfItemTextBoxes(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+) {
+  const util = (pdfjsLib as unknown as { Util: { transform: (a: number[], b: number[]) => number[] } }).Util;
+  const boxes: TextLayerBox[] = [];
+  for (const item of items) {
+    const raw = (item.str ?? "").trim();
+    if (!raw) {
+      continue;
+    }
+    const transform = item.transform ? util.transform(viewport.transform, item.transform) : [1, 0, 0, 1, 0, 0];
+    const fontHeight = Math.max(8, Math.hypot(transform[2], transform[3]));
+    const fallbackWidth = Math.max(8, raw.length * fontHeight * 0.52);
+    boxes.push({
+      text: raw,
+      start: 0,
+      end: 0,
+      rect: {
+        left: transform[4],
+        top: transform[5] - fontHeight,
+        width: typeof item.width === "number" && item.width > 0 ? item.width * scale : fallbackWidth,
+        height: fontHeight * 1.25,
+      },
+      fontSize: fontHeight,
+      fontName: item.fontName ?? "",
+    });
+  }
+  return boxes;
+}
+
+export function inferTextLayoutModeFromBoxes(boxes: TextLayerBox[]): DocumentTextLayoutMode {
+  const lines = textLinesFromBoxes(boxes, "single");
+  if (lines.length < 10) {
+    return "single";
+  }
+  const minLeft = Math.min(...lines.map((line) => line.rect.left));
+  const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
+  const span = Math.max(1, maxRight - minLeft);
+  const bodyLines = lines.filter((line) => {
+    const width = line.rect.width;
+    const center = line.rect.left + width / 2;
+    return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
+  });
+  if (bodyLines.length < 8) {
+    return "single";
+  }
+  const midpoint = minLeft + span / 2;
+  const leftCount = bodyLines.filter((line) => line.rect.left + line.rect.width / 2 < midpoint).length;
+  const rightCount = bodyLines.length - leftCount;
+  if (leftCount < 4 || rightCount < 4 || Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) < 0.26) {
+    return "single";
+  }
+  const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
+  const bestGap = centers.slice(1).reduce((best, center, index) => Math.max(best, center - centers[index]), 0);
+  return bestGap > Math.max(58, span * 0.11) ? "two-column" : "single";
+}
+
+export function textLayoutModeFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+): DocumentTextLayoutMode {
+  return inferTextLayoutModeFromBoxes(pdfItemTextBoxes(items, viewport, scale));
+}
+
+export function textBoxesFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+  scale: number,
+  layoutMode: DocumentTextLayoutMode | "auto" = "auto",
+) {
+  const boxes = pdfItemTextBoxes(items, viewport, scale);
+  return textAndBoxesFromOrderedLines(textLinesFromBoxes(boxes, layoutMode));
+}
+
