@@ -258,12 +258,26 @@ function cleanDictionaryMeaning(value: string) {
     .trim();
 }
 
+function stripExampleText(value: string) {
+  return value
+    .replace(/\([^)]*(?:예문|예시|예를\s*들어|example|examples)[^)]*\)/gi, " ")
+    .split(/(?:\bexamples?\b|예문|예시|예를\s*들어|예\s*:)/i)[0]
+    .replace(/[“”"'][^“”"']{8,}[“”"']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function hasKoreanText(value: string) {
   return /[\uac00-\ud7a3]/.test(value);
 }
 
+function looksLikeKoreanExample(value: string) {
+  const wordCount = value.split(/\s+/).filter(Boolean).length;
+  return wordCount >= 5 && /(?:다|요|니다|했다|한다|된다|였다)[.!?。]?$/.test(value);
+}
+
 function koreanDictionaryMeaningParts(value: string) {
-  const cleaned = cleanDictionaryMeaning(value).replace(/[A-Za-z\u00c0-\u024f\u1d00-\u1d7f\u0250-\u02af]+/g, " ");
+  const cleaned = stripExampleText(cleanDictionaryMeaning(value)).replace(/[A-Za-z\u00c0-\u024f\u1d00-\u1d7f\u0250-\u02af]+/g, " ");
   return cleaned
     .split(/[,;\/|]+/)
     .map((part) =>
@@ -273,7 +287,7 @@ function koreanDictionaryMeaningParts(value: string) {
         .replace(/^-+|-+$/g, "")
         .trim(),
     )
-    .filter((part) => hasKoreanText(part) && part.length <= 40);
+    .filter((part) => hasKoreanText(part) && part.length <= 40 && !looksLikeKoreanExample(part));
 }
 
 function normalizeKoreanDictionaryMeaning(value: string) {
@@ -388,7 +402,25 @@ function collectKoreanDictionaryValues(value: unknown, output: Set<string>, dept
     return;
   }
   for (const [key, nested] of Object.entries(record)) {
-    if (["forms", "sounds", "pronunciations", "hyphenation", "synonyms", "antonyms", "derived", "related"].includes(key)) {
+    if (
+      [
+        "forms",
+        "sounds",
+        "pronunciations",
+        "hyphenation",
+        "synonyms",
+        "antonyms",
+        "derived",
+        "related",
+        "example",
+        "examples",
+        "sentences",
+        "definition",
+        "definitions",
+        "gloss",
+        "glosses",
+      ].includes(key)
+    ) {
       continue;
     }
     collectKoreanDictionaryValues(nested, output, depth + 1, inTranslations || key === "translations");
@@ -734,9 +766,9 @@ export function wordMeaningMapFromSettings(settings: Record<string, string>): Wo
 
 function parsedWordMeaningFromRecord(record: Record<string, unknown>, fallbackWord = ""): ParsedWordMeaning | null {
   const word = normalizeWordKey(String(record.word ?? record.term ?? record.english ?? fallbackWord));
-  const meaning = String(record.meaning ?? record.korean ?? record.translation ?? record.definition ?? "").trim();
+  const meaning = stripExampleText(String(record.meaning ?? record.korean ?? record.translation ?? record.definition ?? "")).trim();
   const context = String(record.context ?? record.reason ?? record.note ?? "").trim();
-  if (!word || !meaning || !hasKoreanText(meaning)) {
+  if (!word || !meaning || !hasKoreanText(meaning) || looksLikeKoreanExample(meaning)) {
     return null;
   }
   return { word, meaning, context };
@@ -791,11 +823,11 @@ export function parseWordMeaningItems(outputText: string, fallbackWords: string[
       }
       return {
         word: normalizeWordKey(match[1]),
-        meaning: match[2].trim(),
+        meaning: stripExampleText(match[2]).trim(),
         context: "",
       };
     })
-    .filter((row): row is ParsedWordMeaning => row !== null);
+    .filter((row): row is ParsedWordMeaning => row !== null && hasKoreanText(row.meaning) && !looksLikeKoreanExample(row.meaning));
 }
 
 export function requestedWordMeaningTerms(result: AiResultRecord, fallbackWords: string[]) {

@@ -83,6 +83,7 @@ import {
   wordMeaningTaskType,
 } from "./lib/aiResults";
 import { compactUiText } from "./lib/fileActions";
+import { readingStatusSettingKey, type ReadingStatus } from "./lib/readingStatus";
 import {
   deleteAiResults,
   importPdf,
@@ -93,6 +94,7 @@ import {
   setSetting,
   startBridgeWorker,
   updateDocument,
+  upsertNote,
 } from "./lib/tauri";
 import type {
   AiResultRecord,
@@ -1008,6 +1010,23 @@ function App() {
     setMode("library");
   }
 
+  async function saveLibraryDocumentDetails(document: DocumentRecord, markdown: string, readingStatus: ReadingStatus) {
+    const timestamp = nowIso();
+    const key = readingStatusSettingKey(document.id);
+    const existingNote = state.notes.find((note) => note.documentId === document.id);
+    const note = await upsertNote({
+      id: existingNote?.id ?? `note-${document.id}`,
+      documentId: document.id,
+      markdown,
+      updatedAt: timestamp,
+    });
+    await setSetting(key, readingStatus);
+    patchState((draft) => {
+      draft.notes = [note, ...draft.notes.filter((item) => item.id !== note.id)];
+      draft.settings[key] = readingStatus;
+    });
+  }
+
   const floatingResultIsTranslation = Boolean(
     floatingResult && ["translateText", "translatePage"].includes(floatingResult.taskType.toString()),
   );
@@ -1096,6 +1115,7 @@ function App() {
           <LibraryManagerView
             state={state}
             documents={filteredDocuments}
+            notes={state.notes}
             libraryQuery={libraryQuery}
             folderFilter={folderFilter}
             newFolderName={newFolderName}
@@ -1116,6 +1136,7 @@ function App() {
             onDeleteDocuments={(ids) => void deleteDocumentsFromLibrary(ids)}
             onToggleBookmark={(document) => void toggleDocumentBookmark(document)}
             onRenameDocument={(document) => void renameDocumentTitle(document)}
+            onSaveDocumentDetails={saveLibraryDocumentDetails}
           />
         )}
 

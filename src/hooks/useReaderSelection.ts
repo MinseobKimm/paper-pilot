@@ -155,7 +155,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
       return;
     }
     setSelectionToolbar(toolbar);
-    setTextSelectionPreview(null);
+    setTextSelectionPreview(layoutMode === "single" ? null : { page: toolbar.page, rects: toolbar.rects });
     if (layoutMode !== "single") {
       selection?.removeAllRanges();
     }
