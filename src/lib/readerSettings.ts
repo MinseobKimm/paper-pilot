@@ -1,12 +1,11 @@
 import type { DocumentTextLayoutMode } from "./pdfText";
 import { cleanAiOutput, parseAiJson, stripJsonFence } from "./textUtils";
 
-const documentTextLayoutSettingPrefix = "documentTextLayout:";
-const documentTextLayoutAiVersionSettingPrefix = "documentTextLayoutAiVersion:";
+const pageTextLayoutAiVersionSettingPrefix = "pageTextLayoutAiVersion:";
 const pageTextLayoutSettingPrefix = "pageTextLayout:";
 const pageTextLayoutConfidenceSettingPrefix = "pageTextLayoutConfidence:";
 const pageTextLayoutSourceSettingPrefix = "pageTextLayoutSource:";
-export const documentTextLayoutAiVersion = "document-text-layout-v2";
+export const pageTextLayoutAiVersion = "page-text-layout-v1";
 
 export const defaultReaderZoom = 1.05;
 export const minReaderZoom = 0.55;
@@ -42,12 +41,8 @@ export function documentHorizontalScrollSettingKey(documentId: string) {
   return `documentScrollLeft:${documentId}`;
 }
 
-export function documentTextLayoutSettingKey(documentId: string) {
-  return `${documentTextLayoutSettingPrefix}${documentId}`;
-}
-
-export function documentTextLayoutAiVersionSettingKey(documentId: string) {
-  return `${documentTextLayoutAiVersionSettingPrefix}${documentId}`;
+export function pageTextLayoutAiVersionSettingKey(documentId: string) {
+  return `${pageTextLayoutAiVersionSettingPrefix}${documentId}`;
 }
 
 export function pageTextLayoutSettingKey(documentId: string, pageNumber: number) {
@@ -67,10 +62,6 @@ export function normalizeDocumentTextLayoutMode(value: string | null | undefined
     return value;
   }
   return "";
-}
-
-export function documentTextLayoutModeFromSettings(settings: Record<string, string>, documentId: string | null | undefined): DocumentTextLayoutMode | "" {
-  return documentId ? normalizeDocumentTextLayoutMode(settings[documentTextLayoutSettingKey(documentId)]) : "";
 }
 
 export function pageTextLayoutModeFromSettings(
@@ -116,41 +107,6 @@ export function horizontalScrollFromSettings(settings: Record<string, string>, d
   }
   const value = Number(settings[documentHorizontalScrollSettingKey(documentId)]);
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-
-
-export function parseDocumentTextLayoutMode(value: string): DocumentTextLayoutMode | "" {
-  const readable = stripJsonFence(cleanAiOutput(value));
-  const candidates = [readable];
-  const jsonMatch = readable.match(/\{[\s\S]*\}/);
-  if (jsonMatch && jsonMatch[0] !== readable) {
-    candidates.push(jsonMatch[0]);
-  }
-  for (const candidate of candidates) {
-    try {
-      const parsed = parseAiJson(candidate);
-      if (parsed && typeof parsed === "object") {
-        const record = parsed as Record<string, unknown>;
-        const raw = String(record.layout ?? record.mode ?? record.columns ?? "").toLowerCase();
-        if (raw.includes("two") || raw.includes("2")) {
-          return "two-column";
-        }
-        if (raw.includes("single") || raw.includes("one") || raw.includes("1")) {
-          return "single";
-        }
-      }
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  const text = readable.toLowerCase();
-  if (/\btwo[-\s]?column\b|\b2[-\s]?column\b/.test(text)) {
-    return "two-column";
-  }
-  if (/\bsingle[-\s]?column\b|\bone[-\s]?column\b|\b1[-\s]?column\b/.test(text)) {
-    return "single";
-  }
-  return "";
 }
 
 export function parsePageTextLayoutModes(value: string): Array<{ pageNumber: number; mode: DocumentTextLayoutMode }> {

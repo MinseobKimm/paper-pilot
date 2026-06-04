@@ -4,9 +4,9 @@ import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import { normalizeAiProviderKind } from "../lib/ai";
 import { aiOutlineVersion, documentOutlineVersionSettingKey, hasFreshPendingOutlineResult, outlinePagesForAi, parseAiOutlineRows } from "../lib/outlines";
 import {
-  documentTextLayoutAiVersion,
-  documentTextLayoutAiVersionSettingKey,
   pageTextLayoutConfidenceFromSettings,
+  pageTextLayoutAiVersion,
+  pageTextLayoutAiVersionSettingKey,
   pageTextLayoutModeFromSettings,
   pageTextLayoutSourceSettingKey,
 } from "../lib/readerSettings";
@@ -208,8 +208,8 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
       return;
     }
     const documentId = activeDocument.id;
-    const versionKey = documentTextLayoutAiVersionSettingKey(documentId);
-    const versionCurrent = state.settings[versionKey] === documentTextLayoutAiVersion;
+    const versionKey = pageTextLayoutAiVersionSettingKey(documentId);
+    const versionCurrent = state.settings[versionKey] === pageTextLayoutAiVersion;
     const hasPendingLayout = activeAiResults.some(
       (result) => result.taskType.toString() === "classifyDocumentLayout" && result.status === "pending",
     );
@@ -234,9 +234,9 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
       .slice(0, 8);
     if (layoutCandidates.length === 0) {
       patchState((draft) => {
-        draft.settings[versionKey] = documentTextLayoutAiVersion;
+        draft.settings[versionKey] = pageTextLayoutAiVersion;
       });
-      void setSetting(versionKey, documentTextLayoutAiVersion);
+      void setSetting(versionKey, pageTextLayoutAiVersion);
       return;
     }
     let cancelled = false;
@@ -265,9 +265,9 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
         return;
       }
       patchState((draft) => {
-        draft.settings[versionKey] = documentTextLayoutAiVersion;
+        draft.settings[versionKey] = pageTextLayoutAiVersion;
       });
-      await setSetting(versionKey, documentTextLayoutAiVersion);
+      await setSetting(versionKey, pageTextLayoutAiVersion);
       if (queued.status !== "pending") {
         await saveDocumentLayoutFromResult(queued);
       }

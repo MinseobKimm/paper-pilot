@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { AiResultRecord, AppStateRecord } from "../types";
 import { currentNote, documentPages } from "../lib/appState";
 import { aiOutlineVersion, documentOutlineVersionSettingKey, readerOutlineRows, type OutlineAnchor, type OutlineRow } from "../lib/outlines";
-import { documentTextLayoutModeFromSettings, horizontalScrollFromSettings, pageTextLayoutModesFromSettings } from "../lib/readerSettings";
+import { horizontalScrollFromSettings, pageTextLayoutModesFromSettings } from "../lib/readerSettings";
 import { translationLanguageNameFromSettings, uiLanguageFromSettings, uiStrings } from "../lib/uiStrings";
 import { currentTranslationUnitsForSelection, selectedSourceSentenceIds } from "../lib/readerDerived";
 import { extractDocumentTermCandidates, normalizeWordKey, parseStoredWordList, wordMeaningMapFromSettings } from "../lib/wordMeanings";
@@ -35,7 +35,6 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
           : [],
     [activeDocument?.pageCount, activePages],
   );
-  const activeDocumentTextLayoutMode = documentTextLayoutModeFromSettings(input.state.settings, input.activeDocumentId);
   const activePageTextLayoutModes = useMemo(
     () =>
       pageTextLayoutModesFromSettings(
@@ -114,7 +113,6 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
   return {
     activeDocument,
     activePages,
-    activeDocumentTextLayoutMode,
     activePageTextLayoutModes,
     currentPage,
     wordMeaningMap,

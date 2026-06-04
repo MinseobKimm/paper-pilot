@@ -19,7 +19,6 @@ type QueueTask = (
 type ReaderSelectionInput = {
   activeDocument: DocumentRecord | null;
   activePages: PageRecord[];
-  activeDocumentTextLayoutMode: DocumentTextLayoutMode | "";
   ui: UiStrings;
   uiLanguage: UiLanguage;
   patchState: PatchState;
@@ -37,7 +36,6 @@ export function useReaderSelection(input: ReaderSelectionInput) {
   const {
     activeDocument,
     activePages,
-    activeDocumentTextLayoutMode,
     ui,
     uiLanguage,
     patchState,
@@ -62,7 +60,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
 
   function textLayoutModeForPage(page: HTMLElement | null): DocumentTextLayoutMode | "auto" {
     const pageLayout = page?.dataset.textLayout;
-    return pageLayout === "single" || pageLayout === "two-column" ? pageLayout : activeDocumentTextLayoutMode || "auto";
+    return pageLayout === "single" || pageLayout === "two-column" ? pageLayout : "auto";
   }
 
   function handleReaderMouseUp(event?: ReactMouseEvent) {

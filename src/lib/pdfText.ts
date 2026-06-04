@@ -69,6 +69,36 @@ export function medianNumber(values: number[]) {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
+function quantileNumber(values: number[], quantile: number) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = Math.max(0, Math.min(1, quantile)) * (sorted.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) {
+    return sorted[lower];
+  }
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+function lineRight(line: TextLine) {
+  return line.rect.left + line.rect.width;
+}
+
+function lineBottom(line: TextLine) {
+  return line.rect.top + line.rect.height;
+}
+
+function lineCenterX(line: TextLine) {
+  return line.rect.left + line.rect.width / 2;
+}
+
+function lineCenterY(line: TextLine) {
+  return line.rect.top + line.rect.height / 2;
+}
+
 export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTextLayoutMode | "auto" = "auto") {
   const sorted = [...boxes]
     .filter((box) => box.text.trim())
@@ -738,75 +768,169 @@ export function inferPageTextLayoutFromBoxes(boxes: TextLayerBox[]): PageTextLay
   if (lines.length < 10) {
     return { mode: "single", confidence: 0.52, reason: "too few text lines for a confident column split" };
   }
-  const minLeft = Math.min(...lines.map((line) => line.rect.left));
-  const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
+  const boxLeft = quantileNumber(boxes.map((box) => box.rect.left), 0.02);
+  const boxRight = quantileNumber(boxes.map((box) => box.rect.left + box.rect.width), 0.98);
+  const minLeft = Math.min(boxLeft, Math.min(...lines.map((line) => line.rect.left)));
+  const maxRight = Math.max(boxRight, Math.max(...lines.map(lineRight)));
   const span = Math.max(1, maxRight - minLeft);
-  const pageLikeWidth = Math.max(span, Math.max(...boxes.map((box) => box.rect.left + box.rect.width)) - Math.min(...boxes.map((box) => box.rect.left)));
-  const bodyLines = lines.filter((line) => {
-    const width = line.rect.width;
-    const center = line.rect.left + width / 2;
-    return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
+  const contentTop = Math.min(...lines.map((line) => line.rect.top));
+  const contentBottom = Math.max(...lines.map(lineBottom));
+  const contentHeight = Math.max(1, contentBottom - contentTop);
+  const fontMedian = medianNumber(lines.map((line) => line.fontSize).filter((size) => size > 0));
+  const narrowLimit = span * 0.68;
+  const candidateLines = lines.filter((line) => {
+    const text = line.text.trim();
+    const center = lineCenterX(line);
+    const y = lineCenterY(line);
+    const widthRatio = line.rect.width / span;
+    const topRatio = (y - contentTop) / contentHeight;
+    const topDisplayText = topRatio < 0.34 && line.fontSize > Math.max(fontMedian * 1.28, fontMedian + 2.4);
+    const centeredHeader = topRatio < 0.28 && widthRatio > 0.48 && Math.abs(center - (minLeft + span / 2)) < span * 0.18;
+    return (
+      text.length >= 3 &&
+      line.rect.width >= Math.max(22, line.fontSize * 2.6) &&
+      line.rect.width < narrowLimit &&
+      center > minLeft + span * 0.04 &&
+      center < maxRight - span * 0.04 &&
+      !topDisplayText &&
+      !centeredHeader
+    );
   });
-  const bodyBoxes = boxes.filter((box) => {
-    const text = box.text.trim();
-    if (!text || box.rect.width <= 1 || box.rect.height <= 1) {
-      return false;
+  const lowerStart = contentTop + contentHeight * 0.30;
+  const lowerCandidateLines = candidateLines.filter((line) => lineCenterY(line) >= lowerStart);
+  const lowerBodyLines =
+    lowerCandidateLines.length >= Math.min(8, candidateLines.length) ? lowerCandidateLines : candidateLines;
+  if (lowerBodyLines.length < 8) {
+    return {
+      mode: "single",
+      confidence: boxes.length > 80 ? 0.62 : 0.55,
+      reason: `few body-column candidates (${lowerBodyLines.length})`,
+    };
+  }
+
+  function evaluateCandidates(bodyLines: TextLine[], label: string) {
+    const centers = bodyLines.map(lineCenterX).sort((a, b) => a - b);
+    let bestGap = 0;
+    let splitX = minLeft + span / 2;
+    for (let index = 1; index < centers.length; index += 1) {
+      const gap = centers[index] - centers[index - 1];
+      const candidateSplit = (centers[index - 1] + centers[index]) / 2;
+      const splitRatio = (candidateSplit - minLeft) / span;
+      if (splitRatio >= 0.32 && splitRatio <= 0.68 && gap > bestGap) {
+        bestGap = gap;
+        splitX = candidateSplit;
+      }
     }
-    const center = box.rect.left + box.rect.width / 2;
-    return center > minLeft + span * 0.04 && center < maxRight - span * 0.04;
-  });
-  if (bodyLines.length < 8) {
+    const leftLines = bodyLines.filter((line) => lineCenterX(line) < splitX);
+    const rightLines = bodyLines.length - leftLines.length;
+    const leftCount = leftLines.length;
+    const rightCount = rightLines;
+    const balance = rightCount > 0 ? Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) : 0;
+    const rowTolerance = Math.max(6, fontMedian * 0.85);
+    const rows: Array<{ top: number; bottom: number; columns: Set<number> }> = [];
+    for (const line of [...bodyLines].sort((a, b) => lineCenterY(a) - lineCenterY(b))) {
+      const y = lineCenterY(line);
+      const column = lineCenterX(line) < splitX ? 0 : 1;
+      let row = rows.find((item) => y >= item.top - rowTolerance && y <= item.bottom + rowTolerance);
+      if (!row) {
+        row = { top: line.rect.top, bottom: lineBottom(line), columns: new Set<number>() };
+        rows.push(row);
+      }
+      row.top = Math.min(row.top, line.rect.top);
+      row.bottom = Math.max(row.bottom, lineBottom(line));
+      row.columns.add(column);
+    }
+    const pairedRows = rows.filter((row) => row.columns.size >= 2).length;
+    const pairedRatio = rows.length ? pairedRows / rows.length : 0;
+    const bandTop = Math.min(...bodyLines.map((line) => line.rect.top));
+    const bandBottom = Math.max(...bodyLines.map(lineBottom));
+    const verticalCoverage = (bandBottom - bandTop) / contentHeight;
+    const bodyBoxes = bodyLines.flatMap((line) => line.boxes).filter((box) => {
+      const text = box.text.trim();
+      if (!text || box.rect.width <= 1 || box.rect.height <= 1) {
+        return false;
+      }
+      const center = box.rect.left + box.rect.width / 2;
+      const y = box.rect.top + box.rect.height / 2;
+      return (
+        y >= bandTop - rowTolerance * 2 &&
+        y <= bandBottom + rowTolerance * 2 &&
+        center > minLeft + span * 0.035 &&
+        center < maxRight - span * 0.035 &&
+        box.fontSize <= Math.max(fontMedian * 1.65, fontMedian + 5)
+      );
+    });
+    const boxCenters = bodyBoxes.map((box) => box.rect.left + box.rect.width / 2).sort((a, b) => a - b);
+    let bestBoxGap = 0;
+    for (let index = 1; index < boxCenters.length; index += 1) {
+      const gap = boxCenters[index] - boxCenters[index - 1];
+      if (gap > bestBoxGap) {
+        bestBoxGap = gap;
+      }
+    }
+    const gutterWidth = Math.max(24, span * 0.045);
+    const gutterHits = bodyBoxes.filter(
+      (box) => box.rect.left <= splitX + gutterWidth / 2 && box.rect.left + box.rect.width >= splitX - gutterWidth / 2,
+    ).length;
+    const gutterDensity = bodyBoxes.length ? gutterHits / bodyBoxes.length : 1;
+    const medianLineWidth = medianNumber(bodyLines.map((line) => line.rect.width)) / span;
+    const hasLineColumnGap = bestGap > Math.max(42, span * 0.08);
+    const hasHugeLineGap = bestGap > Math.max(72, span * 0.135);
+    const hasBoxColumnGap = bestBoxGap > Math.max(30, span * 0.055);
+    const hasUsefulGutter = gutterDensity < 0.24 || (hasHugeLineGap && balance >= 0.5 && gutterDensity < 0.3);
+    const hasPairedRows = pairedRows >= 3 && pairedRatio >= 0.14;
+    const hasEnoughSideEvidence = Math.min(leftCount, rightCount) >= 4 || (hasPairedRows && Math.min(leftCount, rightCount) >= 3);
+    const hasEnoughVerticalEvidence = verticalCoverage >= 0.18 || pairedRows >= 4 || bodyLines.length >= 16;
+    const isBalanced = balance >= 0.34 || (hasPairedRows && balance >= 0.24);
+    const narrowEnough = medianLineWidth < 0.56;
+    const twoColumn =
+      hasEnoughSideEvidence &&
+      hasEnoughVerticalEvidence &&
+      isBalanced &&
+      narrowEnough &&
+      hasUsefulGutter &&
+      (hasLineColumnGap || hasPairedRows || (hasHugeLineGap && hasBoxColumnGap));
+    const lineGapScore = bestGap / Math.max(1, span);
+    const boxGapScore = bestBoxGap / Math.max(1, span);
+    const twoColumnScore =
+      (hasLineColumnGap ? 0.24 : 0) +
+      (hasHugeLineGap ? 0.1 : 0) +
+      (hasBoxColumnGap ? 0.1 : 0) +
+      (hasUsefulGutter ? 0.14 : 0) +
+      (hasPairedRows ? Math.min(0.18, pairedRows * 0.035 + pairedRatio * 0.12) : 0) +
+      (hasEnoughVerticalEvidence ? 0.08 : 0) +
+      (narrowEnough ? 0.08 : 0) +
+      Math.min(0.18, balance * 0.18) +
+      Math.min(0.1, Math.max(lineGapScore, boxGapScore) * 0.65);
     return {
-      mode: "single",
-      confidence: bodyBoxes.length > 80 ? 0.64 : 0.55,
-      reason: `few narrow body lines (${bodyLines.length})`,
+      label,
+      twoColumn,
+      score: twoColumnScore,
+      leftCount,
+      rightCount,
+      balance,
+      bestGap,
+      bestBoxGap,
+      gutterDensity,
+      pairedRows,
+      pairedRatio,
+      verticalCoverage,
+      bodyLineCount: bodyLines.length,
     };
   }
-  const midpoint = minLeft + span / 2;
-  const leftCount = bodyLines.filter((line) => line.rect.left + line.rect.width / 2 < midpoint).length;
-  const rightCount = bodyLines.length - leftCount;
-  const balance = rightCount > 0 ? Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) : 0;
-  if (leftCount < 4 || rightCount < 4 || Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) < 0.26) {
-    return {
-      mode: "single",
-      confidence: Math.max(0.62, 0.82 - balance * 0.4),
-      reason: `unbalanced column candidates (${leftCount}/${rightCount})`,
-    };
-  }
-  const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
-  const bestGap = centers.slice(1).reduce((best, center, index) => Math.max(best, center - centers[index]), 0);
-  const boxCenters = bodyBoxes.map((box) => box.rect.left + box.rect.width / 2).sort((a, b) => a - b);
-  const bestBoxGap = boxCenters.slice(1).reduce((best, center, index) => Math.max(best, center - boxCenters[index]), 0);
-  const gutterWidth = Math.max(24, pageLikeWidth * 0.045);
-  const gutterHits = bodyBoxes.filter((box) => box.rect.left <= midpoint + gutterWidth / 2 && box.rect.left + box.rect.width >= midpoint - gutterWidth / 2).length;
-  const gutterDensity = bodyBoxes.length ? gutterHits / bodyBoxes.length : 1;
-  const lineGapScore = bestGap / Math.max(1, span);
-  const boxGapScore = bestBoxGap / Math.max(1, span);
-  const hasLineColumnGap = bestGap > Math.max(44, span * 0.085);
-  const hasHugeLineGap = bestGap > Math.max(78, span * 0.15);
-  const hasBoxColumnGap = bestBoxGap > Math.max(32, span * 0.06);
-  const hasUsefulGutter = gutterDensity < 0.3;
-  const isBalanced = balance >= 0.42;
-  const hasEnoughBodyEvidence = bodyLines.length >= 14;
-  const twoColumnByLines = isBalanced && hasLineColumnGap && (hasEnoughBodyEvidence || hasHugeLineGap || hasUsefulGutter);
-  const twoColumnByBoxes = isBalanced && hasBoxColumnGap && hasUsefulGutter && bodyBoxes.length >= 40;
-  const mode = twoColumnByLines || twoColumnByBoxes ? "two-column" : "single";
-  const twoColumnScore =
-    (hasLineColumnGap ? 0.28 : 0) +
-    (hasHugeLineGap ? 0.12 : 0) +
-    (hasBoxColumnGap ? 0.12 : 0) +
-    (hasUsefulGutter ? 0.12 : 0) +
-    (hasEnoughBodyEvidence ? 0.12 : 0) +
-    Math.min(0.22, balance * 0.22) +
-    Math.min(0.12, Math.max(lineGapScore, boxGapScore) * 0.75);
+
+  const allEvidence = evaluateCandidates(candidateLines, "all");
+  const lowerEvidence = evaluateCandidates(lowerBodyLines, "body");
+  const evidence = lowerEvidence.score >= allEvidence.score ? lowerEvidence : allEvidence;
+  const mode = evidence.twoColumn ? "two-column" : "single";
   const confidence =
     mode === "two-column"
-      ? Math.max(0.55, Math.min(0.98, twoColumnScore))
-      : Math.max(0.55, Math.min(0.96, 1 - twoColumnScore * 0.65 + Math.min(0.08, gutterDensity)));
+      ? Math.max(0.68, Math.min(0.98, evidence.score))
+      : Math.max(0.55, Math.min(0.94, 1 - evidence.score * 0.62 + Math.min(0.06, evidence.gutterDensity)));
   return {
     mode,
     confidence: Math.round(confidence * 100) / 100,
-    reason: `lines ${leftCount}/${rightCount}, balance ${balance.toFixed(2)}, line gap ${Math.round(bestGap)}, box gap ${Math.round(bestBoxGap)}, gutter ${(gutterDensity * 100).toFixed(1)}%`,
+    reason: `${evidence.label} lines ${evidence.leftCount}/${evidence.rightCount}, balance ${evidence.balance.toFixed(2)}, paired ${evidence.pairedRows}, vertical ${(evidence.verticalCoverage * 100).toFixed(1)}%, line gap ${Math.round(evidence.bestGap)}, box gap ${Math.round(evidence.bestBoxGap)}, gutter ${(evidence.gutterDensity * 100).toFixed(1)}%`,
   };
 }
 

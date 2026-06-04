@@ -50,7 +50,6 @@ type ReaderWorkspaceProps = {
   activeOutlineRows: OutlineRow[];
   activeOutlineId: string | null;
   activeDocumentWordList: string[];
-  activeDocumentTextLayoutMode: DocumentTextLayoutMode | "";
   activePageTextLayoutModes: Record<number, DocumentTextLayoutMode | "">;
   currentPage: PageRecord | undefined;
   currentTranslationUnits: TranslationUnit[];
@@ -327,7 +326,7 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
         {props.pdfDocument &&
           props.activeDocument &&
           pageNumbers.map((pageNumber) => {
-            const textLayoutMode = props.activePageTextLayoutModes[pageNumber] || props.activeDocumentTextLayoutMode;
+            const textLayoutMode = props.activePageTextLayoutModes[pageNumber] || "";
             if (!renderedPages.has(pageNumber)) {
               const pageLayoutClass =
                 textLayoutMode === "single" ? "layout-single" : textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";

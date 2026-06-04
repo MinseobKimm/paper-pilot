@@ -3,12 +3,10 @@ import type { AiResultRecord, AiTaskType, AppStateRecord, DocumentRecord, PageRe
 import { makeId, nowIso } from "../lib/ids";
 import { selectedCodexReasoningEffort } from "../lib/aiPreferences";
 import { wordMeaningLookupEnabled } from "../lib/appState";
-import type { DocumentTextLayoutMode } from "../lib/pdfText";
 import {
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
   pageTextLayoutSourceSettingKey,
-  parseDocumentTextLayoutMode,
   parsePageTextLayoutModes,
 } from "../lib/readerSettings";
 import { setSetting } from "../lib/tauri";
@@ -60,7 +58,6 @@ type WordMeaningControllerInput = {
   showToast: (message: string, kind?: "info" | "error") => void;
   queueTask: QueueTask;
   ensureActivePages: () => Promise<PageRecord[]>;
-  persistDocumentTextLayoutMode: (documentId: string, mode: DocumentTextLayoutMode) => Promise<void>;
 };
 
 export function useWordMeaningController(input: WordMeaningControllerInput) {
@@ -77,7 +74,6 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     showToast,
     queueTask,
     ensureActivePages,
-    persistDocumentTextLayoutMode,
   } = input;
   const [wordPopup, setWordPopup] = useState<WordPopup | null>(null);
   const [wordLookupLoadingKey, setWordLookupLoadingKey] = useState<string | null>(null);
@@ -192,16 +188,8 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
           setSetting(pageTextLayoutSourceSettingKey(result.documentId, page.pageNumber), "ai"),
         ]),
       );
-      const twoColumnCount = pageModes.filter((page) => page.mode === "two-column").length;
-      const documentMode = twoColumnCount >= Math.max(1, Math.ceil(pageModes.length * 0.35)) ? "two-column" : "single";
-      await persistDocumentTextLayoutMode(result.documentId, documentMode);
       return;
     }
-    const mode = parseDocumentTextLayoutMode(result.outputText);
-    if (!mode) {
-      return;
-    }
-    await persistDocumentTextLayoutMode(result.documentId, mode);
   }
 
   async function deleteWordMeaningEntry(word: string, entryId: string) {

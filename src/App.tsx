@@ -34,8 +34,6 @@ import {
 } from "./lib/pdfText";
 import {
   defaultReaderZoom,
-  documentTextLayoutModeFromSettings,
-  documentTextLayoutSettingKey,
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
   pageTextLayoutSourceSettingKey,
@@ -164,6 +162,7 @@ function automaticPaperTitle(metadataTitle: string | undefined, inferredTitle: s
 function App() {
   const [state, setState] = useState<AppStateRecord>(initialState);
   const [mode, setMode] = useState<WorkspaceMode>("library");
+  const modeBeforeSettingsRef = useRef<Exclude<WorkspaceMode, "settings">>("library");
   const [activePanel, setActivePanel] = useState<PanelTab>("ai");
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [pdfDocument, setPdfDocument] = useState<PdfDocumentProxy | null>(null);
@@ -229,7 +228,6 @@ function App() {
   const {
     activeDocument,
     activePages,
-    activeDocumentTextLayoutMode,
     activePageTextLayoutModes,
     currentPage,
     wordMeaningMap,
@@ -314,14 +312,6 @@ function App() {
     showToast,
   });
 
-  async function persistDocumentTextLayoutMode(documentId: string, mode: DocumentTextLayoutMode) {
-    const key = documentTextLayoutSettingKey(documentId);
-    patchState((draft) => {
-      draft.settings[key] = mode;
-    });
-    await setSetting(key, mode);
-  }
-
   async function persistPageTextLayoutInference(
     documentId: string,
     pageNumber: number,
@@ -342,15 +332,6 @@ function App() {
       setSetting(confidenceKey, confidence),
       setSetting(sourceKey, source),
     ]);
-  }
-
-  async function persistDocumentLayoutFromPages(documentId: string, pageModes: DocumentTextLayoutMode[]) {
-    if (pageModes.length === 0) {
-      return;
-    }
-    const twoColumnCount = pageModes.filter((mode) => mode === "two-column").length;
-    const mode = twoColumnCount >= Math.max(1, Math.ceil(pageModes.length * 0.35)) ? "two-column" : "single";
-    await persistDocumentTextLayoutMode(documentId, mode);
   }
 
   function rememberPageTextLayout(documentId: string, pageNumber: number, inference: PageTextLayoutInference) {
@@ -398,11 +379,9 @@ function App() {
       const mappedOutlineRows = outline?.length ? await flattenPdfOutlineRows(pdf, outline, pdf.numPages) : [];
       setPdfOutlineRows(mappedOutlineRows);
       const info = (metadata.info ?? {}) as { Title?: string; Author?: string; CreationDate?: string };
-      let layoutMode = documentTextLayoutModeFromSettings(state.settings, document.id);
       let inferredTitle = "";
       const shouldUpdateTitle = shouldUseAutomaticTitle(document);
-      if (!layoutMode || shouldUpdateTitle) {
-        const sampleInferences: PageTextLayoutInference[] = [];
+      if (shouldUpdateTitle || pdf.numPages > 0) {
         const sampleLimit = Math.min(pdf.numPages, 5);
         for (let pageNumber = 1; pageNumber <= sampleLimit; pageNumber += 1) {
           const page = await pdf.getPage(pageNumber);
@@ -411,20 +390,8 @@ function App() {
           if (pageNumber === 1 && shouldUpdateTitle) {
             inferredTitle = inferPdfTitleFromPdfItems(content.items, viewport, defaultReaderZoom);
           }
-          if (!layoutMode) {
-            const inference = inferPageTextLayoutFromPdfItems(content.items, viewport, defaultReaderZoom);
-            sampleInferences.push(inference);
-            await persistPageTextLayoutInference(document.id, pageNumber, inference);
-          }
-        }
-        if (!layoutMode && sampleInferences.length > 0) {
-          const confidentModes = sampleInferences
-            .filter((inference) => inference.confidence >= 0.68)
-            .map((inference) => inference.mode);
-          const basisModes = confidentModes.length ? confidentModes : sampleInferences.map((inference) => inference.mode);
-          await persistDocumentLayoutFromPages(document.id, basisModes);
-          const twoColumnCount = basisModes.filter((mode) => mode === "two-column").length;
-          layoutMode = twoColumnCount >= Math.max(1, Math.ceil(basisModes.length * 0.35)) ? "two-column" : "single";
+          const inference = inferPageTextLayoutFromPdfItems(content.items, viewport, defaultReaderZoom);
+          await persistPageTextLayoutInference(document.id, pageNumber, inference);
         }
       }
       const automaticTitle = shouldUpdateTitle ? automaticPaperTitle(info.Title, inferredTitle, document.fileName) : "";
@@ -494,29 +461,7 @@ function App() {
         content: Awaited<ReturnType<Awaited<ReturnType<PdfDocumentProxy["getPage"]>>["getTextContent"]>>;
       }
     >();
-    let layoutMode = documentTextLayoutModeFromSettings(state.settings, document.id);
     const pageInferences = new Map<number, PageTextLayoutInference>();
-    if (!layoutMode) {
-      const sampleInferences: PageTextLayoutInference[] = [];
-      const sampleLimit = Math.min(pdf.numPages, 5);
-      for (let pageNumber = 1; pageNumber <= sampleLimit; pageNumber += 1) {
-        const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: defaultReaderZoom });
-        const content = await page.getTextContent();
-        cached.set(pageNumber, { page, viewport, content });
-        const inference = inferPageTextLayoutFromPdfItems(content.items, viewport, defaultReaderZoom);
-        pageInferences.set(pageNumber, inference);
-        sampleInferences.push(inference);
-        await persistPageTextLayoutInference(document.id, pageNumber, inference);
-      }
-      const confidentModes = sampleInferences
-        .filter((inference) => inference.confidence >= 0.68)
-        .map((inference) => inference.mode);
-      const basisModes = confidentModes.length ? confidentModes : sampleInferences.map((inference) => inference.mode);
-      const twoColumnCount = basisModes.filter((mode) => mode === "two-column").length;
-      layoutMode = twoColumnCount >= Math.max(1, Math.ceil(basisModes.length * 0.35)) ? "two-column" : "single";
-      await persistDocumentTextLayoutMode(document.id, layoutMode);
-    }
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const cachedPage = cached.get(pageNumber);
       const page = cachedPage?.page ?? (await pdf.getPage(pageNumber));
@@ -525,7 +470,7 @@ function App() {
       const inference = pageInferences.get(pageNumber) ?? inferPageTextLayoutFromPdfItems(content.items, viewport, defaultReaderZoom);
       pageInferences.set(pageNumber, inference);
       await persistPageTextLayoutInference(document.id, pageNumber, inference);
-      const text = pageTextFromPdfItems(content.items, viewport, defaultReaderZoom, inference.mode || layoutMode || "auto");
+      const text = pageTextFromPdfItems(content.items, viewport, defaultReaderZoom, inference.mode || "auto");
       extracted.push({
         documentId: document.id,
         pageNumber,
@@ -533,7 +478,6 @@ function App() {
         outlineLabel: text.split(/[.!?]\s+/)[0]?.slice(0, 90) || `Page ${pageNumber}`,
       });
     }
-    await persistDocumentLayoutFromPages(document.id, Array.from(pageInferences.values()).map((inference) => inference.mode));
     return extracted;
   }
 
@@ -807,7 +751,6 @@ function App() {
   } = useReaderSelection({
     activeDocument,
     activePages,
-    activeDocumentTextLayoutMode,
     ui,
     uiLanguage,
     patchState,
@@ -840,7 +783,6 @@ function App() {
     showToast,
     queueTask,
     ensureActivePages,
-    persistDocumentTextLayoutMode,
   });
 
   const {
@@ -1000,9 +942,21 @@ function App() {
     return activePages.filter((page) => page.text.toLowerCase().includes(query)).map((page) => page.pageNumber);
   }, [activePages, searchTerm]);
 
+  useEffect(() => {
+    if (mode !== "settings") {
+      modeBeforeSettingsRef.current = mode;
+    }
+  }, [mode]);
+
   function toggleSettingsMode() {
     setWordPopup(null);
-    setMode((current) => (current === "settings" ? (activeDocument ? "reader" : "library") : "settings"));
+    setMode((current) => {
+      if (current !== "settings") {
+        modeBeforeSettingsRef.current = current;
+        return "settings";
+      }
+      return modeBeforeSettingsRef.current === "reader" && !activeDocument ? "library" : modeBeforeSettingsRef.current;
+    });
   }
 
   function openLibraryMode() {
@@ -1155,7 +1109,6 @@ function App() {
             activeOutlineRows={activeOutlineRows}
             activeOutlineId={activeOutlineId}
             activeDocumentWordList={activeDocumentWordList}
-            activeDocumentTextLayoutMode={activeDocumentTextLayoutMode}
             activePageTextLayoutModes={activePageTextLayoutModes}
             currentPage={currentPage}
             currentTranslationUnits={currentTranslationUnits}
