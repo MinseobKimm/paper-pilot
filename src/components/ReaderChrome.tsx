@@ -1,5 +1,5 @@
 import type { CSSProperties, PointerEvent } from "react";
-import { BookOpen, ChevronLeft, Eraser, Grid2X2, Highlighter, Languages, List, ListTree, Maximize2, MessageSquareText, Sparkles, X } from "./icons";
+import { BookOpen, Bookmark, ChevronLeft, Eraser, Grid2X2, Highlighter, Languages, List, Maximize2, Sparkles, X } from "./icons";
 import { InlineMathText, OutlineTitleText } from "./FormattedAiText";
 import type { DocumentRecord, PageRecord } from "../types";
 import type { OutlineRow } from "../lib/outlines";
@@ -97,53 +97,6 @@ export function ReaderOutline(props: {
   );
 }
 
-export function ReaderRail(props: {
-  ui: UiStrings;
-  outlineOpen: boolean;
-  translationPanelOpen: boolean;
-  rightPanelOpen: boolean;
-  onShowOutline: () => void;
-  onToggleTranslationPanel: () => void;
-  onTogglePanel: () => void;
-}) {
-  return (
-    <nav className="reader-rail" aria-label="Reader workspace">
-      <button className="rail-mark" title="Paper Pilot" data-tooltip="Paper Pilot" aria-label="Paper Pilot">
-        <BookOpen size={18} />
-      </button>
-      <div className="rail-group">
-        <button
-          className={props.outlineOpen ? "active" : ""}
-          title={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
-          data-tooltip={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
-          aria-label={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
-          onClick={props.onShowOutline}
-        >
-          <ListTree size={18} />
-        </button>
-        <button
-          className={props.translationPanelOpen ? "active" : ""}
-          title={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
-          data-tooltip={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
-          aria-label={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
-          onClick={props.onToggleTranslationPanel}
-        >
-          <Languages size={18} />
-        </button>
-        <button
-          className={props.rightPanelOpen ? "active" : ""}
-          title={props.ui.panel}
-          data-tooltip={props.ui.panel}
-          aria-label={props.ui.panel}
-          onClick={props.onTogglePanel}
-        >
-          <MessageSquareText size={18} />
-        </button>
-      </div>
-    </nav>
-  );
-}
-
 export function ReaderActionPalette(props: {
   ui: UiStrings;
   markupTool: ReaderMarkupTool;
@@ -151,6 +104,8 @@ export function ReaderActionPalette(props: {
   wordMeaningLookupEnabled: boolean;
   wordListCount: number;
   missingWordCount: number;
+  readerBookmarkCount: number;
+  onAddReaderBookmark: () => void;
   onSelectHighlightColor: (color: string) => void;
   onSelectEraser: () => void;
   onStartRegionExplain: () => void;
@@ -194,6 +149,16 @@ export function ReaderActionPalette(props: {
       </div>
       <button className="floating-tool" title={props.ui.explainImage} data-tooltip={props.ui.explainImage} aria-label={props.ui.explainImage} onClick={props.onStartRegionExplain}>
         <Maximize2 size={17} />
+      </button>
+      <button
+        className="floating-tool with-badge"
+        title={props.ui.addReaderBookmark}
+        data-tooltip={props.ui.addReaderBookmark}
+        aria-label={props.ui.addReaderBookmark}
+        onClick={props.onAddReaderBookmark}
+      >
+        <Bookmark size={17} />
+        {props.readerBookmarkCount > 0 && <span className="floating-badge">{Math.min(99, props.readerBookmarkCount)}</span>}
       </button>
       <button
         className={props.autoTranslate ? "floating-tool active" : "floating-tool"}

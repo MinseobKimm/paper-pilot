@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { outlineAnchorDomId, type OutlineAnchor, type OutlineRow } from "../lib/outlines";
-import { clampNumber, documentHorizontalScrollSettingKey, nextPageTranslationReadProgress } from "../lib/readerSettings";
+import { clampNumber, documentHorizontalScrollSettingKey, nextPageTranslationReadProgress, type ReaderBookmark } from "../lib/readerSettings";
 import { setSetting } from "../lib/tauri";
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import type { AppStateRecord, DocumentRecord, PageRecord, WorkspaceMode } from "../types";
@@ -242,11 +242,39 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
     });
   }
 
+  function restoreReaderBookmark(bookmark: ReaderBookmark) {
+    setPageCursor(bookmark.page);
+    setActiveOutlineId(null);
+    const scrollToBookmark = () => {
+      const element = readerRef.current;
+      if (!element) {
+        return;
+      }
+      const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      const maxLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+      const targetTop = Number.isFinite(bookmark.scrollTop)
+        ? bookmark.scrollTop
+        : bookmark.scrollRatio * maxTop;
+      element.scrollTo({
+        top: clampNumber(targetTop, 0, maxTop),
+        left: clampNumber(bookmark.scrollLeft, 0, maxLeft),
+        behavior: "auto",
+      });
+      scheduleReaderCursorSync(element);
+    };
+    window.requestAnimationFrame(() => {
+      scrollToBookmark();
+      window.requestAnimationFrame(scrollToBookmark);
+      window.setTimeout(scrollToBookmark, 140);
+    });
+  }
+
   return {
     scheduleHorizontalScrollSave,
     rememberOutlineAnchors,
     goToPage,
     goToOutlineRow,
+    restoreReaderBookmark,
     scheduleReaderCursorSync,
   };
 }

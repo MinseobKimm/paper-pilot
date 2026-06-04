@@ -3673,7 +3673,7 @@ select:disabled {
   min-width: 0;
 }
 
-.toolbar-document > div {
+.toolbar-title-copy {
   display: grid;
   min-width: 0;
   line-height: 1.15;
@@ -3693,6 +3693,17 @@ select:disabled {
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toolbar-reader-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 3px;
+  border: 1px solid #d8ddd9;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .toolbar-actions {
@@ -3750,7 +3761,6 @@ select:disabled {
 
 .reader-grid {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(420px, 1fr)
     minmax(320px, var(--study-dock-width, 380px));
@@ -3759,67 +3769,18 @@ select:disabled {
 
 .reader-grid.outline-closed {
   grid-template-columns:
-    56px
     minmax(420px, 1fr)
     minmax(320px, var(--study-dock-width, 380px));
 }
 
 .reader-grid.dock-closed {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(420px, 1fr);
 }
 
 .reader-grid.outline-closed.dock-closed {
-  grid-template-columns: 56px minmax(420px, 1fr);
-}
-
-.reader-rail {
-  position: relative;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  min-height: 0;
-  padding: 10px 7px;
-  border-right: 1px solid #d2d9d3;
-  background: #fbfdf9;
-}
-
-.reader-rail button {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: #4b5a55;
-}
-
-.reader-rail button:hover,
-.reader-rail button.active {
-  border-color: #c7ddd6;
-  background: #e7f2ee;
-  color: #0e6b62;
-}
-
-.reader-rail .rail-mark {
-  border-color: #11322e;
-  background: #11322e;
-  color: #ffffff;
-}
-
-.rail-group {
-  display: grid;
-  gap: 7px;
-}
-
-.rail-bottom {
-  margin-top: auto;
+  grid-template-columns: minmax(420px, 1fr);
 }
 
 .reader-outline {
@@ -3858,6 +3819,60 @@ select:disabled {
 .pdf-stage {
   background: #f4f6f2;
   padding: 28px 42px;
+}
+
+.pdf-stage-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pdf-stage-shell .pdf-stage {
+  height: 100%;
+}
+
+.reader-bookmark-track {
+  position: absolute;
+  top: 18px;
+  right: 6px;
+  bottom: 18px;
+  z-index: 80;
+  width: 18px;
+  pointer-events: none;
+}
+
+.reader-bookmark-dot {
+  position: absolute;
+  right: 2px;
+  display: block;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #d83b32;
+  box-shadow:
+    0 0 0 1px rgba(142, 28, 21, 0.28),
+    0 3px 8px rgba(142, 28, 21, 0.34);
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.reader-bookmark-dot:hover,
+.reader-bookmark-dot:focus-visible {
+  width: 14px;
+  height: 14px;
+  outline: none;
+  background: #ef483d;
+  box-shadow:
+    0 0 0 2px rgba(216, 59, 50, 0.18),
+    0 5px 14px rgba(142, 28, 21, 0.42);
+}
+
+[data-theme="ink"] .reader-bookmark-dot {
+  border-color: #141a1b;
 }
 
 .pdf-page-shell {
@@ -3930,14 +3945,12 @@ select:disabled {
   color: #ffffff;
 }
 
-.reader-rail [data-tooltip],
 .reader-action-palette [data-tooltip],
 .assistant-toolbar [data-tooltip],
 .toolbar-icon[data-tooltip] {
   position: relative;
 }
 
-.reader-rail [data-tooltip]::after,
 .reader-action-palette [data-tooltip]::after,
 .assistant-toolbar [data-tooltip]::after,
 .toolbar-icon[data-tooltip]::after {
@@ -3968,8 +3981,6 @@ select:disabled {
   left: auto;
 }
 
-.reader-rail [data-tooltip]:hover::after,
-.reader-rail [data-tooltip]:focus-visible::after,
 .reader-action-palette [data-tooltip]:hover::after,
 .reader-action-palette [data-tooltip]:focus-visible::after,
 .assistant-toolbar [data-tooltip]:hover::after,
@@ -4141,7 +4152,6 @@ select:disabled {
 
   .reader-grid {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(300px, 1fr)
       minmax(280px, var(--study-dock-width, 320px));
@@ -4149,20 +4159,18 @@ select:disabled {
 
   .reader-grid.outline-closed {
     grid-template-columns:
-      52px
       minmax(300px, 1fr)
       minmax(280px, var(--study-dock-width, 320px));
   }
 
   .reader-grid.dock-closed {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(300px, 1fr);
   }
 
   .reader-grid.outline-closed.dock-closed {
-    grid-template-columns: 52px minmax(300px, 1fr);
+    grid-template-columns: minmax(300px, 1fr);
   }
 
   .translation-sentence p {
@@ -4173,7 +4181,6 @@ select:disabled {
 /* Translation moved beside outline, with Ask AI as a full-height chat dock. */
 .reader-grid {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(280px, var(--translation-width, 360px))
     minmax(420px, 1fr)
@@ -4182,7 +4189,6 @@ select:disabled {
 
 .reader-grid.panel-closed {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(280px, var(--translation-width, 360px))
     minmax(420px, 1fr);
@@ -4190,7 +4196,6 @@ select:disabled {
 
 .reader-grid.translation-closed {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(420px, 1fr)
     minmax(320px, var(--right-panel-width, 360px));
@@ -4198,14 +4203,12 @@ select:disabled {
 
 .reader-grid.panel-closed.translation-closed {
   grid-template-columns:
-    56px
     minmax(176px, var(--outline-width, 220px))
     minmax(420px, 1fr);
 }
 
 .reader-grid.outline-closed {
   grid-template-columns:
-    56px
     minmax(280px, var(--translation-width, 360px))
     minmax(420px, 1fr)
     minmax(320px, var(--right-panel-width, 360px));
@@ -4213,20 +4216,18 @@ select:disabled {
 
 .reader-grid.outline-closed.panel-closed {
   grid-template-columns:
-    56px
     minmax(280px, var(--translation-width, 360px))
     minmax(420px, 1fr);
 }
 
 .reader-grid.outline-closed.translation-closed {
   grid-template-columns:
-    56px
     minmax(420px, 1fr)
     minmax(320px, var(--right-panel-width, 360px));
 }
 
 .reader-grid.outline-closed.panel-closed.translation-closed {
-  grid-template-columns: 56px minmax(420px, 1fr);
+  grid-template-columns: minmax(420px, 1fr);
 }
 
 .translation-sidecar {
@@ -4382,7 +4383,6 @@ select:disabled {
 @media (max-width: 1260px) {
   .reader-grid {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(260px, var(--translation-width, 280px))
       minmax(300px, 1fr)
@@ -4391,7 +4391,6 @@ select:disabled {
 
   .reader-grid.panel-closed {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(260px, var(--translation-width, 280px))
       minmax(300px, 1fr);
@@ -4399,7 +4398,6 @@ select:disabled {
 
   .reader-grid.translation-closed {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(300px, 1fr)
       minmax(280px, var(--right-panel-width, 320px));
@@ -4407,14 +4405,12 @@ select:disabled {
 
   .reader-grid.panel-closed.translation-closed {
     grid-template-columns:
-      52px
       minmax(160px, var(--outline-width, 180px))
       minmax(300px, 1fr);
   }
 
   .reader-grid.outline-closed {
     grid-template-columns:
-      52px
       minmax(260px, var(--translation-width, 280px))
       minmax(300px, 1fr)
       minmax(280px, var(--right-panel-width, 320px));
@@ -4422,20 +4418,18 @@ select:disabled {
 
   .reader-grid.outline-closed.panel-closed {
     grid-template-columns:
-      52px
       minmax(260px, var(--translation-width, 280px))
       minmax(300px, 1fr);
   }
 
   .reader-grid.outline-closed.translation-closed {
     grid-template-columns:
-      52px
       minmax(300px, 1fr)
       minmax(280px, var(--right-panel-width, 320px));
   }
 
   .reader-grid.outline-closed.panel-closed.translation-closed {
-    grid-template-columns: 52px minmax(300px, 1fr);
+    grid-template-columns: minmax(300px, 1fr);
   }
 }
 

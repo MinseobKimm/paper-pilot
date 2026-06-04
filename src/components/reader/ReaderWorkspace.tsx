@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type MouseEvent, type MouseEventHandler, type PointerEvent, type RefObject, type SetStateAction } from "react";
 import { EmptyReader } from "../LibraryViews";
-import { ReaderActionPalette, ReaderOutline, ReaderRail } from "../ReaderChrome";
+import { ReaderActionPalette, ReaderOutline } from "../ReaderChrome";
 import { RightPanel, type ReaderAssistantMode } from "../panels/ReaderPanels";
 import { setSetting, upsertAnnotation, deleteCitationCard, upsertCitationCard } from "../../lib/tauri";
 import { sentenceUnitsForPage, translationResultForPage, type TranslationUnit } from "../../lib/translations";
 import { wordMeaningLookupEnabled } from "../../lib/appState";
 import { wordMeaningLookupEnabledSettingKey, type WordPopup } from "../../lib/wordMeanings";
 import type { DocumentTextLayoutMode, PageTextLayoutInference, SelectionToolbar } from "../../lib/pdfText";
+import type { ReaderBookmark } from "../../lib/readerSettings";
 import type { OutlineAnchor, OutlineRow } from "../../lib/outlines";
 import type { PdfDocumentProxy } from "../../lib/pdfDocument";
 import type { PdfLinkPreviewTarget } from "../../lib/linkPreviews";
@@ -60,6 +61,7 @@ type ReaderWorkspaceProps = {
   pageCursor: number;
   pageImages: Record<number, string>;
   pageMatches: number[];
+  readerBookmarks: ReaderBookmark[];
   zoom: number;
   searchTerm: string;
   hoverSource: string | null;
@@ -93,6 +95,9 @@ type ReaderWorkspaceProps = {
   onStartLayoutResize: (area: "outline" | "translation" | "rightPanel", event: PointerEvent) => void;
   onGoToPage: (page: number) => void;
   onGoToOutlineRow: (row: OutlineRow) => void;
+  onAddReaderBookmark: () => void;
+  onGoToReaderBookmark: (bookmark: ReaderBookmark) => void;
+  onDeleteReaderBookmark: (bookmarkId: string) => void;
   onSelectSentenceAndScroll: (id: string) => void;
   onRefreshTranslationForPage: (page: PageRecord) => void;
   onScheduleHorizontalScrollSave: (scrollLeft: number) => void;
@@ -231,18 +236,6 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
         .join(" ")}
       style={props.readerGridStyle}
     >
-      <ReaderRail
-        ui={props.ui}
-        outlineOpen={props.outlineOpen}
-        translationPanelOpen={props.translationPanelOpen}
-        rightPanelOpen={props.rightPanelOpen}
-        onShowOutline={() => {
-          props.setOutlineOpen((value) => !value);
-          props.setOutlineCompact(false);
-        }}
-        onToggleTranslationPanel={() => props.setTranslationPanelOpen((value) => !value)}
-        onTogglePanel={() => props.setRightPanelOpen((value) => !value)}
-      />
       {props.outlineOpen && (
         <ReaderOutline
           compact={props.outlineCompact}
@@ -274,108 +267,135 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
           onClose={() => props.setTranslationPanelOpen(false)}
         />
       )}
-      <div
-        ref={props.readerRef}
-        className={[
-          "pdf-stage",
-          props.regionMode ? "region-mode" : "",
-          props.markupTool.kind === "erase" ? "highlight-erase-mode" : "",
-          props.markupTool.kind === "highlight" ? "highlight-paint-mode" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        onMouseDown={props.onHandleRegionMouseDown}
-        onMouseMove={props.onHandleRegionMouseMove}
-        onMouseUp={(event) => void props.onFinishRegionExplain(event)}
-        onScroll={(event) => {
-          props.onScheduleHorizontalScrollSave(event.currentTarget.scrollLeft);
-          props.onScheduleReaderCursorSync(event.currentTarget);
-        }}
-      >
-        <ReaderActionPalette
-          ui={props.ui}
-          markupTool={props.markupTool}
-          autoTranslate={autoTranslate}
-          wordMeaningLookupEnabled={wordMeaningLookupEnabled(props.state.settings)}
-          wordListCount={props.activeDocumentWordList.length}
-          missingWordCount={props.missingWordCount}
-          onSelectHighlightColor={(color) =>
-            props.setMarkupTool((current) =>
-              current.kind === "highlight" && current.color === color ? { kind: "none" } : { kind: "highlight", color },
-            )
-          }
-          onSelectEraser={() =>
-            props.setMarkupTool((current) => (current.kind === "erase" ? { kind: "none" } : { kind: "erase" }))
-          }
-          onStartRegionExplain={() => {
-            props.setRegionMode(true);
-            props.onShowToast(props.ui.dragRegionPrompt);
+      <div className="pdf-stage-shell">
+        <div
+          ref={props.readerRef}
+          className={[
+            "pdf-stage",
+            props.regionMode ? "region-mode" : "",
+            props.markupTool.kind === "erase" ? "highlight-erase-mode" : "",
+            props.markupTool.kind === "highlight" ? "highlight-paint-mode" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          onMouseDown={props.onHandleRegionMouseDown}
+          onMouseMove={props.onHandleRegionMouseMove}
+          onMouseUp={(event) => void props.onFinishRegionExplain(event)}
+          onScroll={(event) => {
+            props.onScheduleHorizontalScrollSave(event.currentTarget.scrollLeft);
+            props.onScheduleReaderCursorSync(event.currentTarget);
           }}
-          onToggleAutoTranslate={toggleAutoTranslate}
-          onToggleWordMeaningLookup={toggleWordMeaningLookup}
-          onBuildWordMeanings={props.onCreateMissingWordMeanings}
-        />
-        {!props.activeDocument && <EmptyReader onPickFile={props.onPickFile} />}
-        {props.activeDocument && !props.pdfDocument && (
-          <EmptyReader
-            label={props.ui.openStoredPdf}
-            hint={props.ui.selectedDocumentNeedsLoad}
-            onPickFile={() => props.activeDocument && props.onLoadActiveDocument(props.activeDocument)}
-          />
-        )}
-        {props.pdfDocument &&
-          props.activeDocument &&
-          pageNumbers.map((pageNumber) => {
-            const textLayoutMode = props.activePageTextLayoutModes[pageNumber] || "";
-            if (!renderedPages.has(pageNumber)) {
-              const pageLayoutClass =
-                textLayoutMode === "single" ? "layout-single" : textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";
-              return (
-                <div
-                  key={`${props.activeDocument?.id}-${pageNumber}-placeholder-${props.zoom}`}
-                  id={`page-${pageNumber}`}
-                  className={`pdf-page-shell pdf-page-placeholder ${pageLayoutClass}`}
-                  data-page={pageNumber}
-                  data-text-layout={textLayoutMode || "auto"}
-                  style={{ width: estimatedPageWidth, minHeight: estimatedPageHeight }}
-                >
-                  <div className="page-label">Page {pageNumber}</div>
-                </div>
-              );
+        >
+          <ReaderActionPalette
+            ui={props.ui}
+            markupTool={props.markupTool}
+            autoTranslate={autoTranslate}
+            wordMeaningLookupEnabled={wordMeaningLookupEnabled(props.state.settings)}
+            wordListCount={props.activeDocumentWordList.length}
+            missingWordCount={props.missingWordCount}
+            readerBookmarkCount={props.readerBookmarks.length}
+            onAddReaderBookmark={props.onAddReaderBookmark}
+            onSelectHighlightColor={(color) =>
+              props.setMarkupTool((current) =>
+                current.kind === "highlight" && current.color === color ? { kind: "none" } : { kind: "highlight", color },
+              )
             }
-            return (
-              <PdfPageView
-                key={`${props.activeDocument?.id}-${pageNumber}-${props.zoom}`}
-                pdf={props.pdfDocument!}
-                documentId={props.activeDocument!.id}
-                pageNumber={pageNumber}
-                zoom={props.zoom}
-                searchTerm={props.searchTerm}
-                referencePages={props.activePages}
-                annotations={props.activeAnnotations.filter((annotation) => annotation.page === pageNumber)}
-                hoverSource={props.hoverSource}
-                sentenceUnits={sentenceUnitsForPage(props.activePages.find((page) => page.pageNumber === pageNumber))}
-                selectedSentenceIds={props.selectedSentenceIds}
-                highlightEraseActive={props.markupTool.kind === "erase"}
-                selectionPreviewRects={
-                  props.textSelectionPreview?.page === pageNumber
-                    ? props.textSelectionPreview.rects
-                    : []
-                }
-                textLayoutMode={textLayoutMode}
-                onTextLayoutReady={props.onRememberPageTextLayout}
-                onWordSelect={props.onOpenWordMeaningPopup}
-                regionDrag={props.regionDrag}
-                onTextReady={props.onCreatePageText}
-                onOutlineReady={props.onRememberOutlineAnchors}
-                onImageReady={props.onRememberPageImage}
-                captureImage={false}
-                onOpenExplanation={props.onOpenExplanation}
-                onDeleteAnnotation={(id) => props.onDeleteAnnotationById(id)}
-                onPreviewLink={(target) => props.onOpenLinkPreview(target)}
-              />
-            );
-          })}
+            onSelectEraser={() =>
+              props.setMarkupTool((current) => (current.kind === "erase" ? { kind: "none" } : { kind: "erase" }))
+            }
+            onStartRegionExplain={() => {
+              props.setRegionMode(true);
+              props.onShowToast(props.ui.dragRegionPrompt);
+            }}
+            onToggleAutoTranslate={toggleAutoTranslate}
+            onToggleWordMeaningLookup={toggleWordMeaningLookup}
+            onBuildWordMeanings={props.onCreateMissingWordMeanings}
+          />
+          {!props.activeDocument && <EmptyReader onPickFile={props.onPickFile} />}
+          {props.activeDocument && !props.pdfDocument && (
+            <EmptyReader
+              label={props.ui.openStoredPdf}
+              hint={props.ui.selectedDocumentNeedsLoad}
+              onPickFile={() => props.activeDocument && props.onLoadActiveDocument(props.activeDocument)}
+            />
+          )}
+          {props.pdfDocument &&
+            props.activeDocument &&
+            pageNumbers.map((pageNumber) => {
+              const textLayoutMode = props.activePageTextLayoutModes[pageNumber] || "";
+              if (!renderedPages.has(pageNumber)) {
+                const pageLayoutClass =
+                  textLayoutMode === "single" ? "layout-single" : textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";
+                return (
+                  <div
+                    key={`${props.activeDocument?.id}-${pageNumber}-placeholder-${props.zoom}`}
+                    id={`page-${pageNumber}`}
+                    className={`pdf-page-shell pdf-page-placeholder ${pageLayoutClass}`}
+                    data-page={pageNumber}
+                    data-text-layout={textLayoutMode || "auto"}
+                    style={{ width: estimatedPageWidth, minHeight: estimatedPageHeight }}
+                  >
+                    <div className="page-label">Page {pageNumber}</div>
+                  </div>
+                );
+              }
+              return (
+                <PdfPageView
+                  key={`${props.activeDocument?.id}-${pageNumber}-${props.zoom}`}
+                  pdf={props.pdfDocument!}
+                  documentId={props.activeDocument!.id}
+                  pageNumber={pageNumber}
+                  zoom={props.zoom}
+                  searchTerm={props.searchTerm}
+                  referencePages={props.activePages}
+                  annotations={props.activeAnnotations.filter((annotation) => annotation.page === pageNumber)}
+                  hoverSource={props.hoverSource}
+                  sentenceUnits={sentenceUnitsForPage(props.activePages.find((page) => page.pageNumber === pageNumber))}
+                  selectedSentenceIds={props.selectedSentenceIds}
+                  highlightEraseActive={props.markupTool.kind === "erase"}
+                  selectionPreviewRects={
+                    props.textSelectionPreview?.page === pageNumber
+                      ? props.textSelectionPreview.rects
+                      : []
+                  }
+                  textLayoutMode={textLayoutMode}
+                  onTextLayoutReady={props.onRememberPageTextLayout}
+                  onWordSelect={props.onOpenWordMeaningPopup}
+                  regionDrag={props.regionDrag}
+                  onTextReady={props.onCreatePageText}
+                  onOutlineReady={props.onRememberOutlineAnchors}
+                  onImageReady={props.onRememberPageImage}
+                  captureImage={false}
+                  onOpenExplanation={props.onOpenExplanation}
+                  onDeleteAnnotation={(id) => props.onDeleteAnnotationById(id)}
+                  onPreviewLink={(target) => props.onOpenLinkPreview(target)}
+                />
+              );
+            })}
+        </div>
+        {props.readerBookmarks.length > 0 && (
+          <div className="reader-bookmark-track" aria-label={props.ui.readerBookmarks}>
+            {props.readerBookmarks.map((bookmark) => {
+              const progress = Math.max(0, Math.min(1, bookmark.scrollRatio));
+              const title = `${props.ui.goToReaderBookmark} - ${props.ui.page} ${bookmark.page}, ${Math.round(bookmark.zoom * 100)}%`;
+              return (
+                <button
+                  key={bookmark.id}
+                  type="button"
+                  className="reader-bookmark-dot"
+                  style={{ top: `${Math.round(progress * 1000) / 10}%` } as CSSProperties}
+                  title={`${title}. ${props.ui.deleteReaderBookmarkHint}`}
+                  aria-label={title}
+                  onClick={() => props.onGoToReaderBookmark(bookmark)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    props.onDeleteReaderBookmark(bookmark.id);
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
       {props.rightPanelOpen && (
         <RightPanel

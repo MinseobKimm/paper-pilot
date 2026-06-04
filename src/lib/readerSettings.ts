@@ -5,6 +5,7 @@ const pageTextLayoutAiVersionSettingPrefix = "pageTextLayoutAiVersion:";
 const pageTextLayoutSettingPrefix = "pageTextLayout:";
 const pageTextLayoutConfidenceSettingPrefix = "pageTextLayoutConfidence:";
 const pageTextLayoutSourceSettingPrefix = "pageTextLayoutSource:";
+const readerBookmarksSettingPrefix = "readerBookmarks:";
 export const pageTextLayoutAiVersion = "page-text-layout-v1";
 
 export const defaultReaderZoom = 1.05;
@@ -39,6 +40,70 @@ export function documentZoomSettingKey(documentId: string) {
 
 export function documentHorizontalScrollSettingKey(documentId: string) {
   return `documentScrollLeft:${documentId}`;
+}
+
+export type ReaderBookmark = {
+  id: string;
+  documentId: string;
+  page: number;
+  zoom: number;
+  scrollTop: number;
+  scrollLeft: number;
+  scrollRatio: number;
+  createdAt: string;
+};
+
+export function documentReaderBookmarksSettingKey(documentId: string) {
+  return `${readerBookmarksSettingPrefix}${documentId}`;
+}
+
+function normalizeReaderBookmark(value: unknown, documentId: string): ReaderBookmark | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" && record.id.trim() ? record.id : "";
+  const page = Number(record.page);
+  const zoom = Number(record.zoom);
+  const scrollTop = Number(record.scrollTop);
+  const scrollLeft = Number(record.scrollLeft);
+  const scrollRatio = Number(record.scrollRatio);
+  const createdAt = typeof record.createdAt === "string" ? record.createdAt : "";
+  if (!id || !Number.isFinite(page) || !Number.isFinite(zoom)) {
+    return null;
+  }
+  return {
+    id,
+    documentId,
+    page: Math.max(1, Math.round(page)),
+    zoom: clampNumber(zoom, minReaderZoom, maxReaderZoom),
+    scrollTop: Number.isFinite(scrollTop) ? Math.max(0, Math.round(scrollTop)) : 0,
+    scrollLeft: Number.isFinite(scrollLeft) ? Math.max(0, Math.round(scrollLeft)) : 0,
+    scrollRatio: Number.isFinite(scrollRatio) ? clampNumber(scrollRatio, 0, 1) : 0,
+    createdAt,
+  };
+}
+
+export function readerBookmarksFromSettings(settings: Record<string, string>, documentId: string | null) {
+  if (!documentId) {
+    return [];
+  }
+  const raw = settings[documentReaderBookmarksSettingKey(documentId)];
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((item) => normalizeReaderBookmark(item, documentId))
+      .filter((item): item is ReaderBookmark => Boolean(item))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  } catch {
+    return [];
+  }
 }
 
 export function pageTextLayoutAiVersionSettingKey(documentId: string) {

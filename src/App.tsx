@@ -34,9 +34,12 @@ import {
 } from "./lib/pdfText";
 import {
   defaultReaderZoom,
+  documentReaderBookmarksSettingKey,
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
   pageTextLayoutSourceSettingKey,
+  readerBookmarksFromSettings,
+  type ReaderBookmark,
 } from "./lib/readerSettings";
 import {
   buildDocumentContextPack,
@@ -263,6 +266,10 @@ function App() {
     commitZoom,
     startLayoutResize,
   } = useReaderLayout(state.settings, activeDocumentId, patchState);
+  const activeReaderBookmarks = useMemo(
+    () => readerBookmarksFromSettings(state.settings, activeDocumentId),
+    [activeDocumentId, state.settings],
+  );
 
   useEffect(() => {
     if (!activeDocumentId || !state.documents.some((document) => document.id === activeDocumentId)) {
@@ -663,6 +670,7 @@ function App() {
     rememberOutlineAnchors,
     goToPage,
     goToOutlineRow,
+    restoreReaderBookmark,
     scheduleReaderCursorSync,
   } = useReaderViewportSync({
     readerRef,
@@ -685,6 +693,77 @@ function App() {
     setTranslationEligiblePages,
     queueAutoTranslationForPageNumber,
   });
+
+  function persistReaderBookmarks(documentId: string, bookmarks: ReaderBookmark[]) {
+    const key = documentReaderBookmarksSettingKey(documentId);
+    const value = JSON.stringify(bookmarks);
+    patchState((draft) => {
+      draft.settings[key] = value;
+    });
+    void setSetting(key, value);
+  }
+
+  function addReaderBookmark() {
+    if (!activeDocumentId || !pdfDocument) {
+      showToast(ui.openPdfFirst);
+      return;
+    }
+    const element = readerRef.current;
+    if (!element) {
+      showToast(ui.openPdfFirst);
+      return;
+    }
+    const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    const scrollTop = Math.max(0, Math.round(element.scrollTop));
+    const scrollLeft = Math.max(0, Math.round(element.scrollLeft));
+    const samePositionBookmarks = activeReaderBookmarks.filter(
+      (bookmark) =>
+        bookmark.page === pageCursor &&
+        Math.abs(bookmark.zoom - zoom) < 0.001 &&
+        bookmark.scrollTop === scrollTop &&
+        bookmark.scrollLeft === scrollLeft,
+    );
+    if (samePositionBookmarks.length > 0) {
+      const removedIds = new Set(samePositionBookmarks.map((bookmark) => bookmark.id));
+      persistReaderBookmarks(
+        activeDocumentId,
+        activeReaderBookmarks.filter((bookmark) => !removedIds.has(bookmark.id)),
+      );
+      showToast(ui.readerBookmarkDeleted);
+      return;
+    }
+    const bookmark: ReaderBookmark = {
+      id: makeId("reader-bookmark"),
+      documentId: activeDocumentId,
+      page: pageCursor,
+      zoom,
+      scrollTop,
+      scrollLeft,
+      scrollRatio: maxTop > 0 ? Math.max(0, Math.min(1, element.scrollTop / maxTop)) : 0,
+      createdAt: nowIso(),
+    };
+    persistReaderBookmarks(activeDocumentId, [...activeReaderBookmarks, bookmark].slice(-80));
+    showToast(ui.readerBookmarkSaved);
+  }
+
+  function goToReaderBookmark(bookmark: ReaderBookmark) {
+    if (!activeDocumentId || bookmark.documentId !== activeDocumentId) {
+      return;
+    }
+    commitZoom(bookmark.zoom);
+    restoreReaderBookmark(bookmark);
+  }
+
+  function deleteReaderBookmark(bookmarkId: string) {
+    if (!activeDocumentId) {
+      return;
+    }
+    persistReaderBookmarks(
+      activeDocumentId,
+      activeReaderBookmarks.filter((bookmark) => bookmark.id !== bookmarkId),
+    );
+    showToast(ui.readerBookmarkDeleted);
+  }
 
   const {
     linkPreview,
@@ -1014,8 +1093,8 @@ function App() {
           searchTerm={searchTerm}
           busy={isBusy}
           outlineOpen={outlineOpen}
+          rightPanelOpen={rightPanelOpen}
           shareReady={Boolean(activeDocument && (pdfDocument || Object.keys(pageImages).length > 0))}
-          onPickFile={() => fileInputRef.current?.click()}
           onOpenLibrary={openLibraryMode}
           onOpenSettings={toggleSettingsMode}
           onZoomIn={() => commitZoom(zoom + 0.1)}
@@ -1119,6 +1198,7 @@ function App() {
             pageCursor={pageCursor}
             pageImages={pageImages}
             pageMatches={pageMatches}
+            readerBookmarks={activeReaderBookmarks}
             zoom={zoom}
             searchTerm={searchTerm}
             hoverSource={hoverSource}
@@ -1152,6 +1232,9 @@ function App() {
             onStartLayoutResize={startLayoutResize}
             onGoToPage={goToPage}
             onGoToOutlineRow={goToOutlineRow}
+            onAddReaderBookmark={addReaderBookmark}
+            onGoToReaderBookmark={goToReaderBookmark}
+            onDeleteReaderBookmark={deleteReaderBookmark}
             onSelectSentenceAndScroll={selectSentenceAndScroll}
             onRefreshTranslationForPage={(page) => void refreshTranslationForPage(page)}
             onScheduleHorizontalScrollSave={scheduleHorizontalScrollSave}

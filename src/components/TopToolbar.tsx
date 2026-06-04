@@ -1,4 +1,4 @@
-import { Library, Search, Settings, Share2, Upload, X, ZoomIn, ZoomOut } from "./icons";
+import { Languages, Library, ListTree, PanelRight, Search, Settings, Share2, X, ZoomIn, ZoomOut } from "./icons";
 import type { DocumentRecord, WorkspaceMode } from "../types";
 import type { UiStrings } from "../lib/uiStrings";
 type TopToolbarProps = {
@@ -11,8 +11,8 @@ type TopToolbarProps = {
   searchTerm: string;
   busy: boolean;
   outlineOpen: boolean;
+  rightPanelOpen: boolean;
   shareReady: boolean;
-  onPickFile: () => void;
   onOpenLibrary: () => void;
   onOpenSettings: () => void;
   onZoomIn: () => void;
@@ -49,7 +49,29 @@ export function TopToolbar(props: TopToolbarProps) {
         <button title={props.ui.library} data-tooltip={props.ui.library} aria-label={props.ui.library} className={props.mode === "library" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenLibrary}>
           <Library size={17} />
         </button>
-        <div>
+        {props.mode === "reader" && (
+          <div className="toolbar-reader-toggles" aria-label="Reader panels">
+            <button
+              title={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
+              data-tooltip={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
+              aria-label={props.outlineOpen ? props.ui.closeOutline : props.ui.openOutline}
+              className={props.outlineOpen ? "toolbar-icon active" : "toolbar-icon"}
+              onClick={props.onShowOutline}
+            >
+              <ListTree size={17} />
+            </button>
+            <button
+              title={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
+              data-tooltip={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
+              aria-label={props.translationPanelOpen ? props.ui.closeTranslationPanel : props.ui.openTranslationPanel}
+              className={props.translationPanelOpen ? "toolbar-icon active" : "toolbar-icon"}
+              onClick={props.onToggleTranslationPanel}
+            >
+              <Languages size={17} />
+            </button>
+          </div>
+        )}
+        <div className="toolbar-title-copy">
           <span>{props.mode === "reader" ? props.ui.page : "Paper Pilot"}</span>
           <strong>{title}</strong>
         </div>
@@ -103,9 +125,17 @@ export function TopToolbar(props: TopToolbarProps) {
         <button title={props.ui.shareTranslatedPdf} data-tooltip={props.ui.shareTranslatedPdf} aria-label={props.ui.shareTranslatedPdf} className="toolbar-icon" onClick={props.onShareFile} disabled={!props.shareReady}>
           <Share2 size={17} />
         </button>
-        <button title={props.ui.addPdf} data-tooltip={props.ui.addPdf} aria-label={props.ui.addPdf} className="toolbar-icon" onClick={props.onPickFile}>
-          <Upload size={17} />
-        </button>
+        {props.mode === "reader" && (
+          <button
+            title={props.rightPanelOpen ? props.ui.closeRightPanel : props.ui.openRightPanel}
+            data-tooltip={props.rightPanelOpen ? props.ui.closeRightPanel : props.ui.openRightPanel}
+            aria-label={props.rightPanelOpen ? props.ui.closeRightPanel : props.ui.openRightPanel}
+            className={props.rightPanelOpen ? "toolbar-icon active" : "toolbar-icon"}
+            onClick={props.onTogglePanel}
+          >
+            <PanelRight size={17} />
+          </button>
+        )}
         <button title={props.ui.settings} data-tooltip={props.ui.settings} aria-label={props.ui.settings} className={props.mode === "settings" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenSettings}>
           <Settings size={17} />
         </button>
