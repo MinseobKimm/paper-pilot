@@ -362,6 +362,8 @@ export function buildAiPrompt(task: AiTask): string {
     : "";
   const customPrompt = typeof task.payload.customPrompt === "string" ? compactText(task.payload.customPrompt, 2000) : "";
   const targetLanguage = translationLanguageNameFromPayload(task.payload);
+  const conceptTermGlossInstruction =
+    "When the output language is Korean, render important paper concept terms as the exact English term immediately followed by a concise Korean gloss in parentheses, e.g. attention mechanism(주의 메커니즘). Apply this to method names, task names, metrics, named components, and field-specific technical keywords when a Korean gloss helps; keep dataset names, model names, and acronyms English-only if a gloss would be awkward or misleading.";
   const promptDocumentLine = `Document: ${task.document.title || "Untitled"}${task.document.authors ? ` / Authors: ${task.document.authors}` : ""}${
     task.document.year ? ` / Year: ${task.document.year}` : ""
   }`;
@@ -382,7 +384,7 @@ export function buildAiPrompt(task: AiTask): string {
       : "";
   const translationPairInstruction =
     task.taskType === "translatePage"
-      ? `Translate the full source text into natural ${targetLanguage}, but keep alignment exact. Use the provided sentence IDs as the only alignment source. Return one JSON item per translated sentence ID; do not group multiple IDs into one item. For each item, sourceIds must contain exactly one provided ID, and source must be copied exactly from that ID source text. Do not invent, renumber, reorder, or omit source IDs for translated prose. The translation field must be written in ${targetLanguage}. Keep core paper concept terms in English exactly as written when they are model names, method names, task names, dataset/benchmark names, metrics, acronyms, named components, or field-specific technical keywords; translate the surrounding sentence naturally into ${targetLanguage} without forcing local-language equivalents for those terms. Include prose captions, legends, and descriptions attached to figures, photos, graphs, charts, or tables when they explain the visual. Skip only table/chart/graph internals such as cell values, axis labels, tick labels, legend keys without prose, numeric-only fragments, headers/footers, references, and PDF extraction noise unless they are essential prose. Output only valid JSON: {"pairs":[{"sourceIds":["p1-s0"],"source":"exact original sentence for p1-s0","translation":"${targetLanguage} translation"}]}. Keep equations and LaTeX readable in Markdown LaTeX. Do not add explanations or Markdown fences.`
+      ? `Translate the full source text into natural ${targetLanguage}, but keep alignment exact. Use the provided sentence IDs as the only alignment source. Return one JSON item per translated sentence ID; do not group multiple IDs into one item. For each item, sourceIds must contain exactly one provided ID, and source must be copied exactly from that ID source text. Do not invent, renumber, reorder, or omit source IDs for translated prose. The translation field must be written in ${targetLanguage}. ${conceptTermGlossInstruction} Translate the surrounding sentence naturally into ${targetLanguage}. Include prose captions, legends, and descriptions attached to figures, photos, graphs, charts, or tables when they explain the visual. Skip only table/chart/graph internals such as cell values, axis labels, tick labels, legend keys without prose, numeric-only fragments, headers/footers, references, and PDF extraction noise unless they are essential prose. Output only valid JSON: {"pairs":[{"sourceIds":["p1-s0"],"source":"exact original sentence for p1-s0","translation":"${targetLanguage} translation"}]}. Keep equations and LaTeX readable in Markdown LaTeX. Do not add explanations or Markdown fences.`
       : "";
   const taskInstruction: Record<string, string> = {
     explainText:
@@ -392,7 +394,7 @@ export function buildAiPrompt(task: AiTask): string {
     translateText:
       `Translate the selected text into natural ${targetLanguage}. Keep model names, method names, datasets, benchmarks, metrics, acronyms, named components, and field-specific technical terms in English when that is clearer.`,
     translatePage: sentenceRows.length
-      ? `Translate the page into natural ${targetLanguage} using the provided sentence IDs. Return valid JSON only: {"pairs":[{"sourceIds":["p1-s0"],"source":"exact original sentence","translation":"translated sentence"}]}. Each output item must correspond to exactly one provided sentence ID, and source must copy that original sentence exactly. Keep LaTeX readable.`
+      ? `Translate the page into natural ${targetLanguage} using the provided sentence IDs. Return valid JSON only: {"pairs":[{"sourceIds":["p1-s0"],"source":"exact original sentence","translation":"translated sentence"}]}. Each output item must correspond to exactly one provided sentence ID, and source must copy that original sentence exactly. ${conceptTermGlossInstruction} Keep LaTeX readable.`
       : `Translate the page text into natural ${targetLanguage}. Preserve paragraph structure and keep core technical names in English when appropriate.`,
     summarizePaper:
       task.payload.mode === "detailed"
