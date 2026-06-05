@@ -577,7 +577,7 @@ export function localAiOutput(task: AiTask): string {
     case "chatWithPaper":
       return [
         `Question: ${question || "No question provided."}`,
-        "Full-paper mode is queued. Codex CLI will use the stored PDF file path as the primary source.",
+        "Full-paper mode is queued. The loaded PDF is prepared as Markdown and the agent uses that Markdown file as the primary source.",
         ...relevantSentences(question, pages).map((sentence) => `- ${sentence}`),
       ].join("\n");
     case "autoHighlight":

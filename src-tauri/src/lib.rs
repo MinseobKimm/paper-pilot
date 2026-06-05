@@ -8,11 +8,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
@@ -932,6 +933,34 @@ fn read_document_bytes(app: AppHandle, document_id: String) -> AppResult<Vec<u8>
 }
 
 #[tauri::command]
+fn ensure_document_markdown(
+    app: AppHandle,
+    bridge_dir: String,
+    document_id: String,
+) -> AppResult<Option<DocumentMarkdownResult>> {
+    let conn = open_db(&app)?;
+    let document = conn
+        .query_row(
+            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at FROM documents WHERE id = ?1",
+            params![&document_id],
+            row_document,
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Document not found: {document_id}"))?;
+    let base = bridge_base(&app, &bridge_dir)?;
+    let root = project_root(&app);
+    let attachment = prepare_pdf_markdown_attachment(
+        &base,
+        &root,
+        &document.id,
+        &document.id,
+        Path::new(&document.file_path),
+    )?;
+    Ok(attachment.map(|attachment| document_markdown_result(&document.id, attachment)))
+}
+
+#[tauri::command]
 fn update_document(app: AppHandle, document: DocumentRecord) -> AppResult<DocumentRecord> {
     let conn = open_db(&app)?;
     let mut updated = document;
@@ -1398,6 +1427,32 @@ struct ResolvedAgentCommand {
     source: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct MarkdownAttachment {
+    path: PathBuf,
+    source_path: PathBuf,
+    reused_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentMarkdownResult {
+    pub document_id: String,
+    pub markdown_path: String,
+    pub source_path: String,
+    pub reused_cache: bool,
+    pub converter: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceFingerprint {
+    source_path: String,
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
 fn normalize_provider(value: &str) -> String {
     match value {
         "claude-code" => "claude-code".to_string(),
@@ -1612,18 +1667,421 @@ fn task_document_file_path(task: &BridgeTask) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn push_codex_pdf_access_args(args: &mut Vec<String>, task: &BridgeTask) {
+fn push_add_dir_arg(args: &mut Vec<String>, dir: &Path) {
+    let value = dir.to_string_lossy().to_string();
+    if args
+        .windows(2)
+        .any(|pair| pair[0] == "--add-dir" && pair[1] == value)
+    {
+        return;
+    }
+    args.push("--add-dir".to_string());
+    args.push(value);
+}
+
+fn push_parent_add_dir_arg(args: &mut Vec<String>, path: &Path) {
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        push_add_dir_arg(args, parent);
+    }
+}
+
+fn push_codex_chat_source_access_args(
+    args: &mut Vec<String>,
+    task: &BridgeTask,
+    markdown_path: Option<&Path>,
+) {
     if task.task_type != "chatWithPaper" {
         return;
     }
+    if let Some(path) = markdown_path {
+        push_parent_add_dir_arg(args, path);
+        return;
+    }
+    if let Some(pdf_path) = task_document_file_path(task) {
+        push_parent_add_dir_arg(args, &pdf_path);
+    }
+}
+
+fn markitdown_mcp_candidates() -> Vec<PathBuf> {
+    let home = home_dir();
+    let mut raw = Vec::new();
+    if let Some(value) = env::var_os("MARKITDOWN_MCP_BIN") {
+        raw.push(PathBuf::from(value));
+    }
+    for dir in path_dirs() {
+        raw.push(dir.join("markitdown-mcp"));
+    }
+    raw.push(home.join(".local").join("bin").join("markitdown-mcp"));
+    raw.push(
+        home.join("AppData")
+            .join("Roaming")
+            .join("Python")
+            .join("Scripts")
+            .join("markitdown-mcp"),
+    );
+
+    let mut candidates = Vec::new();
+    for path in raw {
+        for expanded in expand_executable_candidate(path) {
+            if !candidates.contains(&expanded) {
+                candidates.push(expanded);
+            }
+        }
+    }
+    candidates
+}
+
+fn resolve_markitdown_mcp_command() -> AppResult<ResolvedAgentCommand> {
+    let candidates = markitdown_mcp_candidates();
+    let executable = candidates
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .ok_or_else(|| {
+            let searched = candidates
+                .iter()
+                .take(12)
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("MarkItDown MCP server was not found. Searched: {searched}. Set MARKITDOWN_MCP_BIN if needed.")
+        })?;
+
+    #[cfg(windows)]
+    {
+        let extension = executable
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if extension == "cmd" || extension == "bat" {
+            return Ok(ResolvedAgentCommand {
+                command: PathBuf::from("cmd.exe"),
+                args_prefix: vec![
+                    "/C".to_string(),
+                    "call".to_string(),
+                    executable.to_string_lossy().to_string(),
+                ],
+                source: executable,
+            });
+        }
+    }
+
+    Ok(ResolvedAgentCommand {
+        command: executable.clone(),
+        args_prefix: Vec::new(),
+        source: executable,
+    })
+}
+
+fn percent_encode_uri_path(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        let ch = *byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | '/' | ':') {
+            encoded.push(ch);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn path_to_file_uri(path: &Path) -> String {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut value = canonical.to_string_lossy().replace('\\', "/");
+    if let Some(stripped) = value.strip_prefix("//?/UNC/") {
+        value = format!("//{stripped}");
+    } else if let Some(stripped) = value.strip_prefix("//?/") {
+        value = stripped.to_string();
+    }
+
+    if value.starts_with("//") {
+        format!("file:{}", percent_encode_uri_path(&value))
+    } else {
+        format!(
+            "file:///{}",
+            percent_encode_uri_path(value.trim_start_matches('/'))
+        )
+    }
+}
+
+fn send_mcp_message(stdin: &mut impl Write, value: &Value) -> AppResult<()> {
+    let line = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| error.to_string())
+}
+
+fn read_mcp_response(reader: &mut impl BufRead, id: i64) -> AppResult<Value> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err(format!(
+                "MarkItDown MCP closed stdout before response id {id}."
+            ));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if message.get("id").and_then(Value::as_i64) == Some(id) {
+            return Ok(message);
+        }
+    }
+}
+
+fn mcp_error_text(value: &Value) -> String {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("detail").and_then(Value::as_str))
+        .unwrap_or("Unknown MCP error")
+        .to_string()
+}
+
+fn mcp_content_text(result: &Value) -> String {
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .filter(|text| !text.trim().is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
+}
+
+fn extract_mcp_tool_text(response: Value) -> AppResult<String> {
+    if let Some(error) = response.get("error") {
+        return Err(mcp_error_text(error));
+    }
+    let result = response
+        .get("result")
+        .ok_or_else(|| "MarkItDown MCP response did not include a result.".to_string())?;
+    let text = mcp_content_text(result);
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(if text.trim().is_empty() {
+            "MarkItDown MCP returned an error.".to_string()
+        } else {
+            text
+        });
+    }
+    if text.trim().is_empty() {
+        Err("MarkItDown MCP returned empty Markdown.".to_string())
+    } else {
+        Ok(text)
+    }
+}
+
+fn convert_pdf_to_markdown_with_mcp(pdf_path: &Path, root: &Path) -> AppResult<String> {
+    let resolved = resolve_markitdown_mcp_command()?;
+    let mut command = Command::new(&resolved.command);
+    command
+        .args(&resolved.args_prefix)
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Failed to start MarkItDown MCP server at {}: {error}",
+            resolved.source.to_string_lossy()
+        )
+    })?;
+    let result = (|| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "MarkItDown MCP stdin was unavailable.".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "MarkItDown MCP stdout was unavailable.".to_string())?;
+        let mut reader = BufReader::new(stdout);
+        send_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "paper-pilot",
+                        "version": "0.1.0"
+                    }
+                }
+            }),
+        )?;
+        let _ = read_mcp_response(&mut reader, 1)?;
+        send_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }),
+        )?;
+        send_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "convert_to_markdown",
+                    "arguments": {
+                        "uri": path_to_file_uri(pdf_path)
+                    }
+                }
+            }),
+        )?;
+        let response = read_mcp_response(&mut reader, 2)?;
+        extract_mcp_tool_text(response)
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn source_fingerprint(path: &Path) -> AppResult<SourceFingerprint> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let modified = metadata
+        .modified()
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    Ok(SourceFingerprint {
+        source_path: path.to_string_lossy().to_string(),
+        len: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+    })
+}
+
+fn markdown_cache_paths(base: &Path, document_id: &str, fallback_id: &str) -> (PathBuf, PathBuf) {
+    let raw = if document_id.trim().is_empty() {
+        fallback_id
+    } else {
+        document_id
+    };
+    let mut stem = sanitize_file_name(raw);
+    if stem.trim_matches('_').is_empty() {
+        stem = sanitize_file_name(fallback_id);
+    }
+    let markdown_path = base.join("markitdown").join(format!("{stem}.md"));
+    let metadata_path = markdown_path.with_extension("meta.json");
+    (markdown_path, metadata_path)
+}
+
+fn cached_markdown_is_fresh(metadata_path: &Path, fingerprint: &SourceFingerprint) -> bool {
+    fs::read_to_string(metadata_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<SourceFingerprint>(&raw).ok())
+        .as_ref()
+        == Some(fingerprint)
+}
+
+fn prepare_markdown_attachment(
+    base: &Path,
+    root: &Path,
+    task: &BridgeTask,
+) -> AppResult<Option<MarkdownAttachment>> {
+    if task.task_type != "chatWithPaper" {
+        return Ok(None);
+    }
     let Some(pdf_path) = task_document_file_path(task) else {
-        return;
+        return Ok(None);
     };
-    let Some(parent) = pdf_path.parent().filter(|path| !path.as_os_str().is_empty()) else {
-        return;
+    prepare_pdf_markdown_attachment(base, root, &task.document_id, &task.id, &pdf_path)
+}
+
+fn prepare_pdf_markdown_attachment(
+    base: &Path,
+    root: &Path,
+    document_id: &str,
+    fallback_id: &str,
+    pdf_path: &Path,
+) -> AppResult<Option<MarkdownAttachment>> {
+    let pdf_path = if pdf_path.is_absolute() {
+        pdf_path.to_path_buf()
+    } else {
+        root.join(pdf_path)
     };
-    args.push("--add-dir".to_string());
-    args.push(parent.to_string_lossy().to_string());
+    let is_pdf = pdf_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false);
+    if !is_pdf {
+        return Ok(None);
+    }
+    if !pdf_path.exists() {
+        return Err(format!(
+            "PDF file does not exist and cannot be converted to Markdown: {}",
+            pdf_path.to_string_lossy()
+        ));
+    }
+
+    let fingerprint = source_fingerprint(&pdf_path)?;
+    let (markdown_path, metadata_path) = markdown_cache_paths(base, document_id, fallback_id);
+    if markdown_path.exists() && cached_markdown_is_fresh(&metadata_path, &fingerprint) {
+        return Ok(Some(MarkdownAttachment {
+            path: markdown_path,
+            source_path: pdf_path,
+            reused_cache: true,
+        }));
+    }
+
+    if let Some(parent) = markdown_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let markdown = convert_pdf_to_markdown_with_mcp(&pdf_path, root)?;
+    let tmp_path = markdown_path.with_extension("md.tmp");
+    fs::write(&tmp_path, markdown).map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(&markdown_path);
+    fs::rename(&tmp_path, &markdown_path).map_err(|error| error.to_string())?;
+    fs::write(
+        &metadata_path,
+        serde_json::to_vec_pretty(&fingerprint).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(Some(MarkdownAttachment {
+        path: markdown_path,
+        source_path: pdf_path,
+        reused_cache: false,
+    }))
+}
+
+fn document_markdown_result(
+    document_id: &str,
+    attachment: MarkdownAttachment,
+) -> DocumentMarkdownResult {
+    DocumentMarkdownResult {
+        document_id: document_id.to_string(),
+        markdown_path: attachment.path.to_string_lossy().to_string(),
+        source_path: attachment.source_path.to_string_lossy().to_string(),
+        reused_cache: attachment.reused_cache,
+        converter: "markitdown-mcp".to_string(),
+    }
 }
 
 fn image_extension(mime: &str) -> &'static str {
@@ -1682,6 +2140,7 @@ fn codex_args(
     root: &Path,
     response_file: &Path,
     image_path: Option<&Path>,
+    markdown_path: Option<&Path>,
 ) -> Vec<String> {
     let model = task
         .model
@@ -1694,11 +2153,8 @@ fn codex_args(
         .filter(|value| matches!(*value, "none" | "low" | "medium" | "high" | "xhigh"));
     let mut args = vec!["exec".to_string()];
 
-    args.extend([
-        "--json".to_string(),
-        "--skip-git-repo-check".to_string(),
-    ]);
-    push_codex_pdf_access_args(&mut args, task);
+    args.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
+    push_codex_chat_source_access_args(&mut args, task, markdown_path);
     args.extend([
         "--sandbox".to_string(),
         "read-only".to_string(),
@@ -1722,7 +2178,7 @@ fn codex_args(
     args
 }
 
-fn claude_args(task: &BridgeTask, root: &Path) -> Vec<String> {
+fn claude_args(task: &BridgeTask, root: &Path, markdown_path: Option<&Path>) -> Vec<String> {
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -1736,6 +2192,9 @@ fn claude_args(task: &BridgeTask, root: &Path) -> Vec<String> {
         "--add-dir".to_string(),
         root.to_string_lossy().to_string(),
     ];
+    if let Some(path) = markdown_path {
+        push_parent_add_dir_arg(&mut args, path);
+    }
     if task.task_type == "chatWithPaper" {
         if let Some(session_id) = task
             .provider_session_id
@@ -1757,8 +2216,55 @@ fn claude_args(task: &BridgeTask, root: &Path) -> Vec<String> {
     args
 }
 
-fn agent_stdin_prompt(task: &BridgeTask, image_path: Option<&Path>) -> String {
+fn markdown_prompt_section(markdown: &MarkdownAttachment) -> String {
+    format!(
+        "Full paper Markdown file path:\n{}\n\nConverted from PDF:\n{}\n\nUse this converted Markdown file as the primary full-paper source. Do not read the PDF directly unless the Markdown file is missing or obviously incomplete.",
+        markdown.path.to_string_lossy(),
+        markdown.source_path.to_string_lossy()
+    )
+}
+
+fn prompt_with_markdown_attachment(
+    prompt: String,
+    task: &BridgeTask,
+    markdown: &MarkdownAttachment,
+) -> String {
+    let prompt = prompt
+        .replace(
+            "Use the PDF file path below as the primary source and inspect the entire paper when the question requires cross-page synthesis.",
+            "Use the converted Markdown file path below as the primary source and inspect the entire paper when the question requires cross-page synthesis.",
+        )
+        .replace(
+            "If the PDF cannot be read directly, say that clearly and then answer only from any provided extracted page capsules.",
+            "If the converted Markdown file cannot be read directly, say that clearly and then answer only from any provided extracted page capsules.",
+        )
+        .replace(
+            "using only the provided PDF evidence",
+            "using only the provided converted Markdown/paper evidence",
+        )
+        .replace(
+            "based only on provided PDF evidence",
+            "based only on provided converted Markdown/paper evidence",
+        );
+    let section = markdown_prompt_section(markdown);
+    if let Some(pdf_path) = task_document_file_path(task) {
+        let old = format!("Full PDF file path:\n{}", pdf_path.to_string_lossy());
+        if prompt.contains(&old) {
+            return prompt.replace(&old, &section);
+        }
+    }
+    format!("{prompt}\n\n{section}")
+}
+
+fn agent_stdin_prompt(
+    task: &BridgeTask,
+    image_path: Option<&Path>,
+    markdown: Option<&MarkdownAttachment>,
+) -> String {
     let mut prompt = task_prompt(task);
+    if let Some(markdown) = markdown {
+        prompt = prompt_with_markdown_attachment(prompt, task, markdown);
+    }
     if task.provider == "claude-code" {
         if let Some(path) = image_path {
             prompt.push_str(&format!(
@@ -2086,12 +2592,52 @@ fn run_agent_task(
             return Ok(metadata);
         }
     };
-    let args = if task.provider == "claude-code" {
-        claude_args(&task, root)
-    } else {
-        codex_args(&task, root, &response_file, image_path.as_deref())
+
+    let markdown_attachment = match prepare_markdown_attachment(base, root, &task) {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            let error_message = format!("PDF to Markdown conversion failed: {error}");
+            let metadata = json!({
+                "id": &task.id,
+                "taskType": &task.task_type,
+                "documentId": &task.document_id,
+                "provider": &task.provider,
+                "model": &task.model,
+                "providerSessionId": &task.provider_session_id,
+                "status": "failed",
+                "output": error_message.clone(),
+                "payload": {
+                    "provider": &task.provider,
+                    "model": &task.model,
+                    "providerSessionId": &task.provider_session_id,
+                    "error": error_message,
+                    "markdownConverter": "markitdown-mcp",
+                    "logPath": log_path,
+                    "errorLogPath": error_log_path,
+                    "finalLogPath": final_log_path,
+                },
+                "savedAt": now(),
+            });
+            finish_agent_task(base, task_file, &task, metadata.clone())?;
+            return Ok(metadata);
+        }
     };
-    let stdin_prompt = agent_stdin_prompt(&task, image_path.as_deref());
+    let markdown_path = markdown_attachment
+        .as_ref()
+        .map(|attachment| attachment.path.as_path());
+    let args = if task.provider == "claude-code" {
+        claude_args(&task, root, markdown_path)
+    } else {
+        codex_args(
+            &task,
+            root,
+            &response_file,
+            image_path.as_deref(),
+            markdown_path,
+        )
+    };
+    let stdin_prompt =
+        agent_stdin_prompt(&task, image_path.as_deref(), markdown_attachment.as_ref());
     let command_display = format!(
         "{} <prompt via stdin>",
         command_line_display(&resolved, &args)
@@ -2157,6 +2703,10 @@ fn run_agent_task(
             "finalLogPath": final_log_path,
             "responseFile": response_file,
             "imagePath": image_path,
+            "markdownPath": markdown_attachment.as_ref().map(|attachment| attachment.path.clone()),
+            "markdownSourcePath": markdown_attachment.as_ref().map(|attachment| attachment.source_path.clone()),
+            "markdownCacheReused": markdown_attachment.as_ref().map(|attachment| attachment.reused_cache),
+            "markdownConverter": markdown_attachment.as_ref().map(|_| "markitdown-mcp"),
         },
         "savedAt": now(),
     });
@@ -2420,6 +2970,7 @@ pub fn run() {
             load_app_state,
             import_pdf,
             read_document_bytes,
+            ensure_document_markdown,
             update_document,
             delete_document,
             save_pages,

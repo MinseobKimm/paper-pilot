@@ -33,6 +33,7 @@ import {
   type PageTextLayoutInference,
 } from "./lib/pdfText";
 import {
+  clampNumber,
   defaultReaderZoom,
   documentReaderBookmarksSettingKey,
   pageTextLayoutConfidenceSettingKey,
@@ -87,6 +88,7 @@ import { compactUiText } from "./lib/fileActions";
 import { readingStatusSettingKey, type ReadingStatus } from "./lib/readingStatus";
 import {
   deleteAiResults,
+  ensureDocumentMarkdown,
   importPdf,
   isTauriRuntime,
   readDocumentBytes,
@@ -162,6 +164,15 @@ function automaticPaperTitle(metadataTitle: string | undefined, inferredTitle: s
   return inferred || (metadataLooksLikeFile ? "" : metadata);
 }
 
+type ViewportRect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
 function App() {
   const [state, setState] = useState<AppStateRecord>(initialState);
   const [mode, setMode] = useState<WorkspaceMode>("library");
@@ -179,6 +190,7 @@ function App() {
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [assistantMode, setAssistantMode] = useState<ReaderAssistantMode>("study");
   const [floatingResultId, setFloatingResultId] = useState<string | null>(null);
+  const [floatingAvoidRect, setFloatingAvoidRect] = useState<ViewportRect | null>(null);
   const [selectedSentenceId, setSelectedSentenceId] = useState<string | null>(null);
   const [translationEligiblePages, setTranslationEligiblePages] = useState<Set<number>>(() => new Set([1]));
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -198,6 +210,7 @@ function App() {
   const incompleteTranslationRetriesRef = useRef<Map<string, number>>(new Map());
   const outlineRequestsRef = useRef<Set<string>>(new Set());
   const documentLayoutRequestsRef = useRef<Set<string>>(new Set());
+  const markdownPreparationRequestsRef = useRef<Set<string>>(new Set());
 
   const patchState = useCallback((mutator: (draft: AppStateRecord) => void) => {
     setState((current) => {
@@ -358,6 +371,18 @@ function App() {
     );
   }
 
+  function prepareMarkdownForLoadedPdf(document: DocumentRecord) {
+    if (markdownPreparationRequestsRef.current.has(document.id)) {
+      return;
+    }
+    markdownPreparationRequestsRef.current.add(document.id);
+    void ensureDocumentMarkdown(bridgePath, document.id)
+      .catch((error) => {
+        markdownPreparationRequestsRef.current.delete(document.id);
+        showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error");
+      });
+  }
+
   async function loadPdfBytes(document: DocumentRecord, bytes?: Uint8Array) {
     setMode("reader");
     if (!bytes && activeDocumentId === document.id && pdfDocument) {
@@ -370,6 +395,7 @@ function App() {
     try {
       const pdfBytes = bytes ?? (await readDocumentBytes(document.id));
       setLoadedBytes(pdfBytes);
+      prepareMarkdownForLoadedPdf(document);
       setPageImages({});
       setPdfOutlineRows([]);
       setPageOutlineAnchors({});
@@ -754,6 +780,74 @@ function App() {
     restoreReaderBookmark(bookmark);
   }
 
+  function captureReaderZoomAnchor() {
+    const element = readerRef.current;
+    if (!element) {
+      return null;
+    }
+    const shells = Array.from(element.querySelectorAll<HTMLElement>(".pdf-page-shell"));
+    if (shells.length === 0) {
+      return null;
+    }
+    const containerBox = element.getBoundingClientRect();
+    const centerX = containerBox.left + element.clientWidth / 2;
+    const centerY = containerBox.top + element.clientHeight / 2;
+    const target =
+      shells.find((shell) => {
+        const box = shell.getBoundingClientRect();
+        return box.top <= centerY && box.bottom >= centerY;
+      }) ??
+      shells
+        .map((shell) => {
+          const box = shell.getBoundingClientRect();
+          return { shell, distance: Math.min(Math.abs(box.top - centerY), Math.abs(box.bottom - centerY)) };
+        })
+        .sort((a, b) => a.distance - b.distance)[0]?.shell;
+    if (!target) {
+      return null;
+    }
+    const targetBox = target.getBoundingClientRect();
+    return {
+      page: Number(target.dataset.page ?? pageCursor) || pageCursor,
+      xRatio: clampNumber((centerX - targetBox.left) / Math.max(1, targetBox.width), 0, 1),
+      yRatio: clampNumber((centerY - targetBox.top) / Math.max(1, targetBox.height), 0, 1),
+    };
+  }
+
+  function restoreReaderZoomAnchor(anchor: ReturnType<typeof captureReaderZoomAnchor>) {
+    if (!anchor) {
+      return;
+    }
+    const apply = () => {
+      const element = readerRef.current;
+      const target = document.getElementById(`page-${anchor.page}`) as HTMLElement | null;
+      if (!element || !target) {
+        return;
+      }
+      const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      const maxLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+      const top = target.offsetTop + target.offsetHeight * anchor.yRatio - element.clientHeight / 2;
+      const left = target.offsetLeft + target.offsetWidth * anchor.xRatio - element.clientWidth / 2;
+      element.scrollTo({
+        top: clampNumber(top, 0, maxTop),
+        left: clampNumber(left, 0, maxLeft),
+        behavior: "auto",
+      });
+      scheduleReaderCursorSync(element);
+    };
+    window.requestAnimationFrame(() => {
+      apply();
+      window.requestAnimationFrame(apply);
+      window.setTimeout(apply, 120);
+    });
+  }
+
+  function commitZoomKeepingView(nextZoom: number) {
+    const anchor = captureReaderZoomAnchor();
+    commitZoom(nextZoom);
+    restoreReaderZoomAnchor(anchor);
+  }
+
   function deleteReaderBookmark(bookmarkId: string) {
     if (!activeDocumentId) {
       return;
@@ -836,6 +930,7 @@ function App() {
     showToast,
     queueTask,
     copyText,
+    onExplanationAnchor: (rect) => setFloatingAvoidRect(rect ?? null),
   });
 
   const {
@@ -1027,6 +1122,16 @@ function App() {
     }
   }, [mode]);
 
+  useEffect(() => {
+    if (mode === "reader") {
+      return;
+    }
+    setFloatingResultId(null);
+    setFloatingAvoidRect(null);
+    setSelectionToolbar(null);
+    setTextSelectionPreview(null);
+  }, [mode, setSelectionToolbar, setTextSelectionPreview]);
+
   function toggleSettingsMode() {
     setWordPopup(null);
     setMode((current) => {
@@ -1097,13 +1202,13 @@ function App() {
           shareReady={Boolean(activeDocument && (pdfDocument || Object.keys(pageImages).length > 0))}
           onOpenLibrary={openLibraryMode}
           onOpenSettings={toggleSettingsMode}
-          onZoomIn={() => commitZoom(zoom + 0.1)}
-          onZoomOut={() => commitZoom(zoom - 0.1)}
+          onZoomIn={() => commitZoomKeepingView(zoom + 0.1)}
+          onZoomOut={() => commitZoomKeepingView(zoom - 0.1)}
           onPageChange={(page) => goToPage(page)}
           onSearch={setSearchTerm}
           onTogglePanel={() => setRightPanelOpen((value) => !value)}
           onToggleTranslationPanel={() => setTranslationPanelOpen((value) => !value)}
-          onZoomChange={commitZoom}
+          onZoomChange={commitZoomKeepingView}
           onShowOutline={() => {
             if (mode === "reader") {
               setOutlineOpen((value) => !value);
@@ -1309,9 +1414,16 @@ function App() {
       {floatingResult && (!floatingResultIsTranslation || translationPanelOpen) && (
         <FloatingAiCard
           result={floatingResult}
-          onClose={() => setFloatingResultId(null)}
+          avoidRect={floatingAvoidRect}
+          onClose={() => {
+            setFloatingResultId(null);
+            setFloatingAvoidRect(null);
+          }}
           onCopy={() => void copyText(getReadableAiOutput(floatingResult, ui), taskTitle(floatingResult.taskType.toString(), ui))}
-          onDelete={(result) => void deleteExplanationResult(result)}
+          onDelete={(result) => {
+            setFloatingAvoidRect(null);
+            void deleteExplanationResult(result);
+          }}
         />
       )}
 

@@ -25,6 +25,7 @@ type ReaderSelectionInput = {
   showToast: (message: string, kind?: "info" | "error") => void;
   queueTask: QueueTask;
   copyText: (text: string, label: string) => Promise<void>;
+  onExplanationAnchor: (rect: SelectionToolbar["viewportRect"] | null) => void;
 };
 
 export type ReaderMarkupTool =
@@ -42,6 +43,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     showToast,
     queueTask,
     copyText,
+    onExplanationAnchor,
   } = input;
   const [selectionToolbar, setSelectionToolbar] = useState<SelectionToolbar | null>(null);
   const [textSelectionPreview, setTextSelectionPreview] = useState<{ page: number; rects: AnnotationRecord['rects'] } | null>(null);
@@ -132,6 +134,14 @@ export function useReaderSelection(input: ReaderSelectionInput) {
             page: Number(page.dataset.page ?? "1"),
             x: rect.left + rect.width / 2,
             y: Math.max(72, rect.top - 46),
+            viewportRect: {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            },
             rects: fallbackRects,
           } satisfies SelectionToolbar)
         : null);
@@ -298,6 +308,14 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     );
     const regionPage = activePages.find((page) => page.pageNumber === drag.page);
     const regionPageText = regionPage ? compactUiText(regionPage.text, 3200) : "";
+    onExplanationAnchor({
+      left: point.rect.left + drag.x,
+      top: point.rect.top + drag.y,
+      right: point.rect.left + drag.x + drag.width,
+      bottom: point.rect.top + drag.y + drag.height,
+      width: drag.width,
+      height: drag.height,
+    });
     const queued = await queueTask("explainRegionImage", {
       page: drag.page,
       region: {
@@ -406,6 +424,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
       return;
     }
     const toolbar = selectionToolbar;
+    onExplanationAnchor(toolbar.viewportRect ?? null);
     const queued = await queueTask("explainText", { text: toolbar.text, page: toolbar.page });
     if (!queued) {
       return;

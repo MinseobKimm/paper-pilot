@@ -10,6 +10,14 @@ export type SelectionToolbar = {
   page: number;
   x: number;
   y: number;
+  viewportRect?: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+  };
   rects: HighlightRect[];
 };
 
@@ -722,6 +730,14 @@ export function selectionFromTextLayer(
     page: Number(page.dataset.page ?? "1"),
     x: (left + right) / 2,
     y: Math.max(72, top - 46),
+    viewportRect: {
+      left,
+      top,
+      right,
+      bottom: Math.max(...selectedSpans.map((item) => item.rect.bottom)),
+      width: right - left,
+      height: Math.max(...selectedSpans.map((item) => item.rect.bottom)) - top,
+    },
     rects,
   };
 }
