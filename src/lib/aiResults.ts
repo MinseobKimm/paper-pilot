@@ -2,6 +2,7 @@ import type { AiResultRecord, AiTaskType, PageRecord } from "../types";
 import { normalizeAiProviderKind } from "./ai";
 import { compactUiText } from "./fileActions";
 import { cleanAiOutput } from "./textUtils";
+import { parseTokenEstimate, tokenEstimateMarkdown } from "./tokenEstimate";
 import { parseTranslationLines, smartSentenceParts } from "./translations";
 import { uiStrings, type UiStrings } from "./uiStrings";
 
@@ -14,6 +15,9 @@ export type AiDisplaySection = {
 
 export const wordMeaningTaskType: AiTaskType = "defineWordMeanings";
 export const rightPanelHiddenTasks = new Set(["translatePage", wordMeaningTaskType, "classifyDocumentLayout"]);
+const chatAskPrefixPattern = /^\[(PDF direct|Fast Answer|Auto Answer|Deep Read)\]\s*/i;
+
+export type ChatAskModeKind = "plain" | "auto" | "fast" | "deep";
 
 export const aiDisplaySections: AiDisplaySection[] = [
   {
@@ -57,6 +61,38 @@ export function taskTitle(taskType: string, ui: UiStrings = uiStrings.ko) {
   return key ? ui[key] ?? taskType : taskType;
 }
 
+export function stripChatAskPrefix(inputText: string) {
+  return inputText.replace(chatAskPrefixPattern, "").trim();
+}
+
+export function chatAskModeKind(inputText: string): ChatAskModeKind {
+  const tag = inputText.match(chatAskPrefixPattern)?.[1]?.toLowerCase() ?? "";
+  if (tag === "auto answer") {
+    return "auto";
+  }
+  if (tag === "fast answer") {
+    return "fast";
+  }
+  if (tag === "deep read" || tag === "pdf direct") {
+    return "deep";
+  }
+  return "plain";
+}
+
+export function chatAskModeLabel(inputText: string) {
+  const kind = chatAskModeKind(inputText);
+  if (kind === "auto") {
+    return "Auto";
+  }
+  if (kind === "fast") {
+    return "Fast";
+  }
+  if (kind === "deep") {
+    return "Deep Read";
+  }
+  return "";
+}
+
 export function formatResultTime(value: string) {
   if (!value) {
     return "";
@@ -75,7 +111,7 @@ export function formatResultTime(value: string) {
 }
 
 export function getReadableAiOutput(result: AiResultRecord, ui: UiStrings = uiStrings.ko) {
-  const text = cleanAiOutput(result.outputText, result.status);
+  const text = cleanAiOutput(result.outputText, result.status).replace(/^Token estimate:[^\n]*(?:\n\n)?/, "");
   if (result.taskType.toString().startsWith("translate") && result.status !== "pending") {
     const translations = parseTranslationLines(text, 0);
     if (translations.length) {
@@ -86,6 +122,10 @@ export function getReadableAiOutput(result: AiResultRecord, ui: UiStrings = uiSt
     return text || ui.aiPendingAnswer;
   }
   return text || ui.noAnswerContent;
+}
+
+export function resultTokenEstimateText(result: AiResultRecord) {
+  return tokenEstimateMarkdown(parseTokenEstimate(result.outputText)).replace(/^Token estimate:\s*/, "");
 }
 
 export function latestResult(results: AiResultRecord[], taskTypes: string[]) {

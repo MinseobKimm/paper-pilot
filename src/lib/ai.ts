@@ -7,6 +7,7 @@ import type {
 import { makeId, nowIso } from "./ids";
 import { buildAiPrompt, bridgePayloadFor, inputTextFor, localAiOutput, providerLabel } from "./aiPrompt";
 import { saveAiResult, writeBridgeTask } from "./tauri";
+import { estimateTokens, prependTokenEstimate } from "./tokenEstimate";
 
 export type AiTask = {
   taskType: AiTaskType;
@@ -32,6 +33,24 @@ export function isAgentProvider(kind: string | null | undefined): boolean {
   return normalizeAiProviderKind(kind) !== "local-draft";
 }
 
+function textFromUnknownRows(value: unknown, key: string): string {
+  if (!Array.isArray(value)) {
+    return "";
+  }
+  return value
+    .map((item) => (item && typeof item === "object" && typeof (item as Record<string, unknown>)[key] === "string" ? (item as Record<string, string>)[key] : ""))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function effectiveInputTokens(prompt: string, task: AiTask): number {
+  let sourceText = "";
+  if (task.taskType === "chatWithPaper" && ["auto", "fast"].includes(String(task.payload.askMode ?? ""))) {
+    sourceText = textFromUnknownRows(task.payload.pages, "text");
+  }
+  return estimateTokens([prompt, sourceText].filter(Boolean).join("\n\n"));
+}
+
 export class AgentCliProvider implements AiProvider {
   constructor(
     private readonly bridgePath: string,
@@ -40,12 +59,16 @@ export class AgentCliProvider implements AiProvider {
 
   async run(task: AiTask): Promise<AiResultRecord> {
     const prompt = buildAiPrompt(task);
+    const inputTokens = effectiveInputTokens(prompt, task);
     const providerSessionId =
       typeof task.payload.providerSessionId === "string" ? task.payload.providerSessionId : undefined;
     const model = typeof task.payload.model === "string" ? task.payload.model : undefined;
     const reasoningEffort =
       typeof task.payload.reasoningEffort === "string" ? task.payload.reasoningEffort : undefined;
-    const bridgePayload = bridgePayloadFor(task, prompt);
+    const bridgePayload = {
+      ...bridgePayloadFor(task, prompt),
+      tokenEstimate: { inputTokens },
+    };
     const bridgeTask = await writeBridgeTask(
       this.bridgePath,
       task.taskType,
@@ -64,7 +87,9 @@ export class AgentCliProvider implements AiProvider {
       documentId: task.document.id,
       taskType: task.taskType,
       inputText: inputTextFor(task.payload),
-      outputText: `${localAiOutput(task)}${taskLocation}\nStatus: waiting for ${providerLabel(this.provider)}.`,
+      outputText: prependTokenEstimate(`${localAiOutput(task)}${taskLocation}\nStatus: waiting for ${providerLabel(this.provider)}.`, {
+        inputTokens,
+      }),
       status: "pending",
       createdAt: bridgeTask.createdAt,
       provider: this.provider,
@@ -76,12 +101,17 @@ export class AgentCliProvider implements AiProvider {
 
 export class LocalDraftProvider implements AiProvider {
   async run(task: AiTask): Promise<AiResultRecord> {
+    const prompt = buildAiPrompt(task);
+    const outputText = localAiOutput(task);
     return saveAiResult({
       id: makeId("local"),
       documentId: task.document.id,
       taskType: task.taskType,
       inputText: inputTextFor(task.payload),
-      outputText: localAiOutput(task),
+      outputText: prependTokenEstimate(outputText, {
+        inputTokens: effectiveInputTokens(prompt, task),
+        outputTokens: estimateTokens(outputText),
+      }),
       status: "complete",
       createdAt: nowIso(),
       provider: "local-draft",

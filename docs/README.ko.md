@@ -101,18 +101,15 @@ Paper Pilot은 읽기 흐름을 짧고 눈에 보이게 유지합니다.
 | 3. 질문 | 선택 텍스트, 페이지 맥락, 이미지 crop을 agent에게 보냅니다. | Explanation, summary, answer |
 | 4. 저장 | 유용한 결과를 하이라이트, 노트, 인용 카드, export bundle로 남깁니다. | Persistent paper memory |
 
-## 🔎 논문 Q&A를 위한 Local RAG
+## 🔎 Ask AI 논문 Q&A
 
-Paper Pilot의 논문 채팅은 현재 읽고 있는 PDF를 근거로 삼습니다.
+Paper Pilot의 논문 채팅은 세 가지 모드로 동작합니다.
 
-사용자가 질문을 입력하면 앱은 추출된 페이지 텍스트에서 local retrieval context를 만듭니다. 논문을 겹치는 chunk로 나누고, BM25-style lexical scoring으로 관련성이 높은 문단을 고른 뒤, 가장 강한 page excerpt를 agent task에 함께 보냅니다. Agent는 이 retrieved excerpt를 근거로 답하고, 페이지 번호를 함께 인용하도록 지시받습니다.
+- `Auto`: 선택된 Codex CLI 또는 Claude Code agent가 질문을 영어로 옮기고 Fast/Deep을 고릅니다.
+- `Fast`: 영어 retrieval query로 lazy sparse page-text evidence를 찾고, 그 근거만 사용해 페이지 인용과 함께 답합니다.
+- `Deep`: agent가 원본 PDF 파일 경로와 compact document context pack을 받고 PDF를 직접 읽습니다.
 
-그래서 논문 Q&A가 원문에서 덜 벗어납니다.
-
-- 답변이 모델 기억에만 기대지 않고 retrieved PDF passage를 기반으로 합니다.
-- 검색된 snippet에는 page number와 match score가 함께 남습니다.
-- match가 약하면 PDF만으로 근거가 부족하다고 말하도록 처리합니다.
-- local retrieval 경로에는 별도의 vector database가 필요하지 않습니다.
+Fast 모드는 PaperQA2가 설치되어 있으면 PaperQA2 sparse adapter를 사용하고, 없으면 compatible local sparse scorer로 fallback합니다. Reader가 이미 추출해 둔 page text만 사용하며 Marker, OCR, PDF-to-Markdown prewarm은 실행하지 않습니다. Fast 근거가 부족하면 Fast 답변을 먼저 보여준 뒤, 아래에 Deep Read follow-up을 자동으로 큐에 넣습니다.
 
 ## 🤖 Agent Bridge
 
@@ -241,7 +238,7 @@ bridge/
 ```text
 paper-pilot/
   src/                 React UI and reading workflow
-  src/lib/             AI bridge, RAG, citations, scholarly lookup
+  src/lib/             AI bridge, citations, scholarly lookup
   src-tauri/           Tauri backend, SQLite, worker commands
   docs/                Korean README and product screenshots
 ```

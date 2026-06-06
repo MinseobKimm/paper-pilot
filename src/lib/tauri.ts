@@ -9,7 +9,6 @@ import type {
   CitationCardRecord,
   CommentRecord,
   DocumentRecord,
-  DocumentMarkdownResult,
   ExportBundle,
   FolderRecord,
   NoteRecord,
@@ -187,14 +186,6 @@ export async function readDocumentBytes(documentId: string): Promise<Uint8Array>
   }
   const raw = sessionStorage.getItem(`paperdock-pdf-${documentId}`);
   return Uint8Array.from(raw ? JSON.parse(raw) : []);
-}
-
-export async function ensureDocumentMarkdown(bridgeDir: string, documentId: string): Promise<DocumentMarkdownResult | null> {
-  const invoke = await getInvoke();
-  if (!invoke) {
-    return null;
-  }
-  return invoke<DocumentMarkdownResult | null>("ensure_document_markdown", { bridgeDir, documentId });
 }
 
 export async function updateDocument(document: DocumentRecord): Promise<DocumentRecord> {

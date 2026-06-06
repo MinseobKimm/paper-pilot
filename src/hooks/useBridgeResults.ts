@@ -8,6 +8,7 @@ import { colorForHighlightTag, parseAutoHighlightCandidates } from "../lib/autoH
 import { wordMeaningTaskType } from "../lib/aiResults";
 import { isStalePendingTranslation, translationInputLanguage, translationInputText, translationRequestKey } from "../lib/translations";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
+import { estimateTokens, parseTokenEstimate, prependTokenEstimate } from "../lib/tokenEstimate";
 
 type PatchState = (mutator: (draft: AppStateRecord) => void) => void;
 
@@ -26,6 +27,7 @@ type BridgeResultsInput = {
   setFloatingResultId: (id: string | null) => void;
   saveWordMeaningsFromResult: (result: AiResultRecord, fallbackWords?: string[]) => Promise<number>;
   saveDocumentLayoutFromResult: (result: AiResultRecord) => Promise<void>;
+  onFastEvidenceInsufficient?: (result: AiResultRecord, metadata: Record<string, unknown>) => Promise<void>;
 };
 
 export function useBridgeResults(input: BridgeResultsInput) {
@@ -44,6 +46,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
     setFloatingResultId,
     saveWordMeaningsFromResult,
     saveDocumentLayoutFromResult,
+    onFastEvidenceInsufficient,
   } = input;
   async function saveLocalAiResult(result: AiResultRecord) {
     const saved = await saveAiResult(result);
@@ -130,9 +133,14 @@ export function useBridgeResults(input: BridgeResultsInput) {
             : typeof nestedPayload.providerSessionId === "string"
               ? nestedPayload.providerSessionId
               : item.providerSessionId;
+        const outputText = bridgeResult.output || JSON.stringify(bridgeResult.payload, null, 2);
+        const pendingEstimate = parseTokenEstimate(item.outputText);
         const savedResult = await saveLocalAiResult({
           ...item,
-          outputText: bridgeResult.output || JSON.stringify(bridgeResult.payload, null, 2),
+          outputText: prependTokenEstimate(outputText, {
+            inputTokens: pendingEstimate.inputTokens,
+            outputTokens: estimateTokens(outputText),
+          }),
           status: bridgeResult.status || "complete",
           provider,
           model,
@@ -154,6 +162,9 @@ export function useBridgeResults(input: BridgeResultsInput) {
         }
         if (savedResult.taskType.toString() === "classifyDocumentLayout") {
           await saveDocumentLayoutFromResult(savedResult);
+        }
+        if (savedResult.taskType.toString() === "chatWithPaper") {
+          await onFastEvidenceInsufficient?.(savedResult, metadata);
         }
         if (item.taskType.toString() === "translatePage" && bridgeResult.status === "failed") {
           const page = activePages.find((candidate) => normalizeComparable(candidate.text) === normalizeComparable(translationInputText(item)));

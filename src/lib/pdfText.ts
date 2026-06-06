@@ -37,6 +37,7 @@ export type TextLayerBox = {
   rect: { left: number; top: number; width: number; height: number };
   fontSize: number;
   fontName: string;
+  order?: number;
 };
 
 export type TextLine = {
@@ -309,6 +310,141 @@ export function dehyphenateLineBreaks(text: string) {
     .trim();
 }
 
+function pdfTextItemPosition(
+  item: { str?: string; transform?: number[]; width?: number; height?: number },
+  viewport: { transform: number[] },
+) {
+  const util = (pdfjsLib as unknown as { Util: { transform: (a: number[], b: number[]) => number[] } }).Util;
+  const transform = item.transform ? util.transform(viewport.transform, item.transform) : [1, 0, 0, 1, 0, 0];
+  return {
+    x: transform[4],
+    y: transform[5],
+    width: typeof item.width === "number" ? item.width : 0,
+    height: typeof item.height === "number" ? item.height : Math.max(0, Math.hypot(transform[2], transform[3])),
+  };
+}
+
+function normalizeFormulaToken(token: string) {
+  return token
+    .replace(/\u001a/g, "{")
+    .replace(/\u2212/g, "-")
+    .replace(/\u00d7/g, "x")
+    .replace(/\u22c5|\u00b7/g, "@")
+    .trim();
+}
+
+function serializeFormulaItems(
+  entries: Array<{
+    str: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>,
+) {
+  let output = "";
+  let previous: (typeof entries)[number] | null = null;
+  let notEqualOverlay = false;
+  for (const entry of entries) {
+    const raw = entry.str;
+    if (!raw.trim()) {
+      continue;
+    }
+    if (raw === "\u0338") {
+      notEqualOverlay = true;
+      continue;
+    }
+    let token = normalizeFormulaToken(raw);
+    if (!token) {
+      continue;
+    }
+    if (notEqualOverlay && token === "=") {
+      token = "!=";
+      notEqualOverlay = false;
+    }
+    const previousRight = previous ? previous.x + previous.width : entry.x;
+    const gap = previous ? entry.x - previousRight : 0;
+    const looksSubscript =
+      previous &&
+      /^[A-Za-z0-9]+$/.test(token) &&
+      previous.height > 0 &&
+      entry.height > 0 &&
+      entry.height <= previous.height * 0.82 &&
+      Math.abs(entry.y - previous.y) > 0.4 &&
+      gap <= Math.max(4, previous.height * 0.45);
+    if (!output) {
+      output = token;
+    } else if (looksSubscript) {
+      output += `_${token}`;
+    } else if (/^[,.;:!?%)\]}]$/.test(token) || token.startsWith("_")) {
+      output += token;
+    } else if (/^[({\[]$/.test(token) || /[({\[]$/.test(output)) {
+      output += token;
+    } else if (/^(=|!=|-|\+|@|x|\/)$/.test(token) || /(?:=|!=|-|\+|@|x|\/)$/.test(output)) {
+      output += ` ${token}`;
+    } else if (gap > Math.max(2, Math.min(entry.height || 8, previous?.height || 8) * 0.22)) {
+      output += ` ${token}`;
+    } else {
+      output += token;
+    }
+    previous = entry;
+  }
+  return output.replace(/\s+/g, " ").replace(/\{\s+/g, "{ ").trim();
+}
+
+export function formulaTextFromPdfItems(
+  items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
+  viewport: { width: number; height: number; transform: number[] },
+) {
+  const entries = items.map((item, order) => ({
+    order,
+    str: item.str ?? "",
+    fontName: item.fontName ?? "",
+    ...pdfTextItemPosition(item, viewport),
+  }));
+  const equationNumbers = entries.filter((entry) => /^\(\d+\)$/.test(entry.str.trim()));
+  const formulas: string[] = [];
+  const seen = new Set<string>();
+  for (const equationNumber of equationNumbers) {
+    const startMarker = entries
+      .filter((entry) => {
+        if (entry.order >= equationNumber.order || entry.str.trim()) {
+          return false;
+        }
+        if (entry.x < 48 || entry.x > equationNumber.x) {
+          return false;
+        }
+        return Math.abs(entry.y - equationNumber.y) <= 34;
+      })
+      .sort((a, b) => Math.abs(a.y - equationNumber.y) - Math.abs(b.y - equationNumber.y) || a.order - b.order)[0];
+    const band = entries
+      .filter((entry) => {
+        if (entry.order >= equationNumber.order || !entry.str.trim()) {
+          return false;
+        }
+        if (startMarker && entry.order <= startMarker.order) {
+          return false;
+        }
+        if (entry.x < 48 || entry.x > equationNumber.x + 4) {
+          return false;
+        }
+        return Math.abs(entry.y - equationNumber.y) <= 34;
+      })
+      .slice(-48);
+    const formula = serializeFormulaItems(band);
+    if (
+      formula &&
+      formula.length >= 6 &&
+      /[=]|dLd|J_|\\partial|∂|sigma|softmax|exp|erf|Phi|Φ/.test(formula) &&
+      !seen.has(formula)
+    ) {
+      seen.add(formula);
+      formulas.push(`${formula} ${equationNumber.str.trim()}`);
+    }
+  }
+  return formulas;
+}
+
 export function pageTextFromPdfItems(
   items: Array<{ str?: string; transform?: number[]; fontName?: string; width?: number; height?: number }>,
   viewport: { width: number; height: number; transform: number[] },
@@ -317,10 +453,12 @@ export function pageTextFromPdfItems(
 ) {
   const { text } = textBoxesFromPdfItems(items, viewport, scale, layoutMode);
   const dehyphenated = dehyphenateLineBreaks(text);
+  const formulas = formulaTextFromPdfItems(items, viewport);
+  const formulaText = formulas.length ? ` Extracted equations: ${formulas.join("; ")}` : "";
   if (dehyphenated) {
-    return dehyphenated;
+    return `${dehyphenated}${formulaText}`.trim();
   }
-  return items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
+  return `${items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim()}${formulaText}`.trim();
 }
 
 function cleanPdfTitleText(value: string) {
@@ -750,7 +888,7 @@ export function pdfItemTextBoxes(
 ) {
   const util = (pdfjsLib as unknown as { Util: { transform: (a: number[], b: number[]) => number[] } }).Util;
   const boxes: TextLayerBox[] = [];
-  for (const item of items) {
+  for (const [order, item] of items.entries()) {
     const raw = (item.str ?? "").trim();
     if (!raw) {
       continue;
@@ -770,6 +908,7 @@ export function pdfItemTextBoxes(
       },
       fontSize: fontHeight,
       fontName: item.fontName ?? "",
+      order,
     });
   }
   return boxes;

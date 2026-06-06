@@ -188,14 +188,6 @@ export type BridgeResult = {
   payload: Record<string, unknown>;
 };
 
-export type DocumentMarkdownResult = {
-  documentId: string;
-  markdownPath: string;
-  sourcePath: string;
-  reusedCache: boolean;
-  converter: string;
-};
-
 export type BridgeWorkerRun = {
   started: boolean;
   taskId: string;

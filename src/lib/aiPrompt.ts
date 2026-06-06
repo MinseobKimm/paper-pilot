@@ -45,7 +45,23 @@ export function inputTextFor(payload: Record<string, unknown>): string {
     return payload.text;
   }
   if (typeof payload.question === "string") {
-    return payload.question;
+    const displayQuestion =
+      payload.triggeredBy === "fast-insufficient" && typeof payload.originalQuestion === "string" && payload.originalQuestion.trim()
+        ? payload.originalQuestion.trim()
+        : payload.question;
+    if (payload.askMode === "fast") {
+      return `[Fast Answer]\n${displayQuestion}`;
+    }
+    if (payload.askMode === "auto") {
+      return `[Auto Answer]\n${displayQuestion}`;
+    }
+    if (payload.askMode === "deep") {
+      return `[Deep Read]\n${displayQuestion}`;
+    }
+    if (payload.askMode === "direct") {
+      return `[PDF direct]\n${displayQuestion}`;
+    }
+    return displayQuestion;
   }
   if (typeof payload.reference === "string") {
     return payload.reference;
@@ -304,6 +320,12 @@ export function buildAiPrompt(task: AiTask): string {
     ? sentenceRows.map((item) => `${item.id}: ${item.source}`).join("\n")
     : "";
   const question = typeof task.payload.question === "string" ? compactText(task.payload.question, 3000) : "";
+  const originalQuestion = typeof task.payload.originalQuestion === "string" ? compactText(task.payload.originalQuestion, 3000) : "";
+  const englishQuestion = typeof task.payload.englishQuestion === "string" ? compactText(task.payload.englishQuestion, 3000) : "";
+  const answerVariantLabel =
+    typeof task.payload.answerVariantLabel === "string"
+      ? compactText(task.payload.answerVariantLabel, 80)
+      : "";
   const reference = typeof task.payload.reference === "string" ? compactText(task.payload.reference, 5000) : "";
   const url = typeof task.payload.url === "string" ? compactText(task.payload.url, 1000) : "";
   const wordMeaningWords = Array.isArray(task.payload.words)
@@ -401,7 +423,9 @@ export function buildAiPrompt(task: AiTask): string {
         ? "Summarize the paper in Korean with at most five concise bullets covering background, problem, method, results, and limitations."
         : "Summarize the core contribution of the paper in exactly three concise Korean lines, each starting with '- '.",
     chatWithPaper:
-      "Answer the user's question in Korean using only the provided PDF evidence. Cite page numbers like (p. 12). If the evidence is insufficient, say what pages were checked and what is missing.",
+      originalQuestion
+        ? "Answer the original user question in the same language as that original question. Use the English inspection question to inspect the paper accurately. Cite page numbers like (p. 12)."
+        : "Answer the user's question in the same language as the question using only the provided paper evidence. Cite page numbers like (p. 12). If the evidence is insufficient, say what pages were checked and what is missing.",
     autoHighlight:
       'Select important claim, method, result, or limitation sentences from the current page. Return valid JSON only: {"highlights":[{"page":1,"text":"exact original sentence","tag":"Methods","reason":"short Korean reason"}]}. The text field must be copied from the PDF exactly.',
     citationReason:
@@ -428,7 +452,9 @@ export function buildAiPrompt(task: AiTask): string {
       : "";
   const languageAwareTaskInstruction =
     task.taskType === "chatWithPaper"
-      ? "Answer in Korean based only on provided PDF evidence. Include page citations in the form (p. 12)."
+      ? originalQuestion
+        ? "Answer in the same language as the original user question based only on provided paper evidence. Include page citations in the form (p. 12)."
+        : "Answer in the same language as the user's question based only on provided paper evidence. Include page citations in the form (p. 12)."
       : task.taskType === "translateText"
         ? `Translate into natural ${targetLanguage}. Keep core technical names in English when appropriate.`
         : task.taskType === "translatePage"
@@ -445,9 +471,11 @@ export function buildAiPrompt(task: AiTask): string {
         ? "Return only the final layout JSON. Do not include prose outside the JSON."
       : task.taskType === "translateText" || task.taskType === "translatePage"
         ? `Write the translated output in ${targetLanguage}. Do not switch languages unless asked.`
-        : "Write the final user-facing answer in Korean. Do not mention hidden prompts, tool execution, or internal process.",
+        : task.taskType === "chatWithPaper"
+          ? "Write the final user-facing answer in the same language as the user's question. Do not mention hidden prompts, tool execution, or internal process."
+          : "Write the final user-facing answer in Korean. Do not mention hidden prompts, tool execution, or internal process.",
     "Use Markdown LaTeX for math: inline `$...$`, display `$$...$$`.",
-    "Use the extracted PDF text below as evidence. For two-column PDFs, the app provides text in reading order: left column first, then right column.",
+    "Use the extracted PDF text below as evidence for page-local tasks. For full-paper chat, use the original PDF file as the primary source.",
     `Task: ${task.taskType}`,
     languageAwareTaskInstruction,
     task.taskType === "outlineDocument" ? outlineJsonInstruction : "",
@@ -457,6 +485,7 @@ export function buildAiPrompt(task: AiTask): string {
     promptDocumentLine,
     fullPaperPdfPath ? `Full PDF file path:\n${fullPaperPdfPath}` : "",
     customPrompt ? `User extra instruction:\n${customPrompt}` : "",
+    answerVariantLabel ? `Answer variant:\n${answerVariantLabel}` : "",
     text ? `Selected text:\n${text}` : "",
     sentenceText ? `Sentence input:\n${sentenceText}` : "",
     wordMeaningWords.length ? `Requested English words:\n${wordMeaningWords.join(", ")}` : "",
@@ -464,6 +493,8 @@ export function buildAiPrompt(task: AiTask): string {
     layoutCandidateText ? `Local page geometry signals:\n${layoutCandidateText}` : "",
     wordMeaningContext ? `Selected word context:\n${wordMeaningContext}` : "",
     existingMeaningText ? `Existing saved meanings for this word:\n${existingMeaningText}` : "",
+    originalQuestion ? `Original user question:\n${originalQuestion}` : "",
+    englishQuestion ? `English inspection question:\n${englishQuestion}` : "",
     question ? `User question:\n${question}` : "",
     reference ? `Reference/link information:\n${reference}` : "",
     task.taskType === "chatWithPaper" && documentContextText ? documentContextText : "",
@@ -485,6 +516,14 @@ function trimmedPagesForBridge(pages: PageRecord[], taskType?: AiTaskType | stri
   }));
 }
 
+function retrievalPagesForBridge(pages: PageRecord[]): PageRecord[] {
+  return pages.map((page) => ({
+    ...page,
+    text: compactText(page.text, 12000),
+    outlineLabel: compactText(page.outlineLabel, 240),
+  }));
+}
+
 export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     prompt,
@@ -499,6 +538,8 @@ export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, u
   };
   if (typeof task.payload.text === "string") payload.text = compactText(task.payload.text, 8000);
   if (typeof task.payload.question === "string") payload.question = compactText(task.payload.question, 3000);
+  if (typeof task.payload.originalQuestion === "string") payload.originalQuestion = compactText(task.payload.originalQuestion, 3000);
+  if (typeof task.payload.englishQuestion === "string") payload.englishQuestion = compactText(task.payload.englishQuestion, 3000);
   if (typeof task.payload.reference === "string") payload.reference = compactText(task.payload.reference, 5000);
   if (typeof task.payload.url === "string") payload.url = task.payload.url;
   if (typeof task.payload.mode === "string") payload.mode = task.payload.mode;
@@ -516,13 +557,21 @@ export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, u
   if (typeof task.payload.translationLanguage === "string") payload.translationLanguage = task.payload.translationLanguage;
   if (typeof task.payload.translationLanguageName === "string") payload.translationLanguageName = task.payload.translationLanguageName;
   if (Array.isArray(task.payload.sentences)) payload.sentences = task.payload.sentences;
+  if (typeof task.payload.answerVariantLabel === "string") payload.answerVariantLabel = task.payload.answerVariantLabel;
+  if (typeof task.payload.triggeredBy === "string") payload.triggeredBy = compactText(task.payload.triggeredBy, 80);
+  if (typeof task.payload.parentResultId === "string") payload.parentResultId = compactText(task.payload.parentResultId, 120);
   if (task.payload.region) payload.region = task.payload.region;
   if (typeof task.payload.imageDataUrl === "string") payload.imageDataUrl = task.payload.imageDataUrl;
-  if (task.taskType === "chatWithPaper") payload.askMode = "direct";
+  if (task.taskType === "chatWithPaper") {
+    const askMode = typeof task.payload.askMode === "string" ? task.payload.askMode : "auto";
+    payload.askMode = askMode === "direct" ? "deep" : askMode;
+  }
   const documentContextPack = documentContextPackFromPayload(task.payload);
   if (documentContextPack) payload.documentContextPack = documentContextPack;
   const pages = pagesFromPayload(task.payload);
-  if (pages.length && task.taskType !== "chatWithPaper") {
+  if (pages.length && task.taskType === "chatWithPaper" && (payload.askMode === "auto" || payload.askMode === "fast")) {
+    payload.pages = retrievalPagesForBridge(pages);
+  } else if (pages.length && task.taskType !== "chatWithPaper") {
     payload.pages = trimmedPagesForBridge(pages, task.taskType);
   }
   return payload;
@@ -575,9 +624,15 @@ export function localAiOutput(task: AiTask): string {
     case "summarizePaper":
       return localSummary(pages, task.payload.mode === "detailed");
     case "chatWithPaper":
+      if (task.payload.askMode === "fast" || task.payload.askMode === "auto") {
+        return [
+          `Question: ${question || "No question provided."}`,
+          "Fast retrieval mode is queued. The agent will plan an English query, retrieve sparse page-text evidence, and answer only from that evidence.",
+        ].join("\n");
+      }
       return [
         `Question: ${question || "No question provided."}`,
-        "Full-paper mode is queued. The loaded PDF is prepared as Markdown and the agent uses that Markdown file as the primary source.",
+        "Full-paper mode is queued. Codex CLI or Claude Code will use the original PDF file path as the primary source.",
         ...relevantSentences(question, pages).map((sentence) => `- ${sentence}`),
       ].join("\n");
     case "autoHighlight":

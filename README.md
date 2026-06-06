@@ -99,18 +99,22 @@ Paper Pilot keeps the reading loop short and visible:
 | 3. Ask | Send selected text, page context, or an image crop to an agent. | Explanation, summary, or answer |
 | 4. Keep | Save useful results as highlights, notes, citation cards, or export bundles. | Persistent paper memory |
 
-## 🔎 Local RAG for Paper Q&A
+## Ask AI Paper Q&A
 
-Paper Pilot grounds paper chat in the PDF you are reading.
+Paper Pilot offers three paper chat modes:
 
-When you ask a question, the app builds a local retrieval context from the extracted page text. It splits the paper into overlapping chunks, ranks them with BM25-style lexical scoring, and sends the strongest page excerpts with the agent task. The agent is then instructed to answer from those retrieved excerpts and cite pages inline.
+- `Auto`: the selected Codex CLI or Claude Code agent translates the question to
+  English and chooses Fast or Deep.
+- `Fast`: the agent uses English retrieval queries against lazily cached sparse
+  page-text evidence, then answers only from that evidence with page citations.
+- `Deep`: the agent receives the original PDF file path plus a compact document
+  context pack and reads the PDF directly.
 
-This keeps paper Q&A closer to the source document:
-
-- answers are based on retrieved PDF passages, not only model memory
-- retrieved snippets keep page numbers and match scores
-- weak matches are treated explicitly, so the agent can say when the PDF does not provide enough evidence
-- no vector database is required for the local retrieval path
+Fast mode uses a PaperQA2 sparse adapter when PaperQA2 is installed, with a
+compatible local sparse scorer as a fallback. It uses text already extracted by
+the reader; it does not run Marker, OCR, or PDF-to-Markdown prewarming. If Fast
+evidence is insufficient, Paper Pilot shows the Fast answer and automatically
+queues a Deep Read follow-up below it.
 
 ## 🤖 Agent Bridge
 
@@ -239,7 +243,7 @@ bridge/
 ```text
 paper-pilot/
   src/                 React UI and reading workflow
-  src/lib/             AI bridge, RAG, citations, scholarly lookup
+  src/lib/             AI bridge, citations, scholarly lookup
   src-tauri/           Tauri backend, SQLite, worker commands
   docs/                Korean README and product screenshots
 ```

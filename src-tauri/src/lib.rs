@@ -8,12 +8,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Cursor, Read, Write};
+use std::io::{Cursor, Read, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
@@ -933,34 +932,6 @@ fn read_document_bytes(app: AppHandle, document_id: String) -> AppResult<Vec<u8>
 }
 
 #[tauri::command]
-fn ensure_document_markdown(
-    app: AppHandle,
-    bridge_dir: String,
-    document_id: String,
-) -> AppResult<Option<DocumentMarkdownResult>> {
-    let conn = open_db(&app)?;
-    let document = conn
-        .query_row(
-            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at FROM documents WHERE id = ?1",
-            params![&document_id],
-            row_document,
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("Document not found: {document_id}"))?;
-    let base = bridge_base(&app, &bridge_dir)?;
-    let root = project_root(&app);
-    let attachment = prepare_pdf_markdown_attachment(
-        &base,
-        &root,
-        &document.id,
-        &document.id,
-        Path::new(&document.file_path),
-    )?;
-    Ok(attachment.map(|attachment| document_markdown_result(&document.id, attachment)))
-}
-
-#[tauri::command]
 fn update_document(app: AppHandle, document: DocumentRecord) -> AppResult<DocumentRecord> {
     let conn = open_db(&app)?;
     let mut updated = document;
@@ -1427,32 +1398,6 @@ struct ResolvedAgentCommand {
     source: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-struct MarkdownAttachment {
-    path: PathBuf,
-    source_path: PathBuf,
-    reused_cache: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocumentMarkdownResult {
-    pub document_id: String,
-    pub markdown_path: String,
-    pub source_path: String,
-    pub reused_cache: bool,
-    pub converter: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SourceFingerprint {
-    source_path: String,
-    len: u64,
-    modified_secs: u64,
-    modified_nanos: u32,
-}
-
 fn normalize_provider(value: &str) -> String {
     match value {
         "claude-code" => "claude-code".to_string(),
@@ -1667,6 +1612,49 @@ fn task_document_file_path(task: &BridgeTask) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn task_ask_mode(task: &BridgeTask) -> String {
+    task.payload
+        .get("askMode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value.eq_ignore_ascii_case("direct") {
+                "deep".to_string()
+            } else {
+                value.to_ascii_lowercase()
+            }
+        })
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+fn task_payload_string(task: &BridgeTask, key: &str) -> String {
+    task.payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn json_string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn compact_for_prompt(value: &str, limit: usize) -> String {
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() > limit {
+        format!("{}...", clean.chars().take(limit).collect::<String>())
+    } else {
+        clean
+    }
+}
+
 fn push_add_dir_arg(args: &mut Vec<String>, dir: &Path) {
     let value = dir.to_string_lossy().to_string();
     if args
@@ -1685,402 +1673,12 @@ fn push_parent_add_dir_arg(args: &mut Vec<String>, path: &Path) {
     }
 }
 
-fn push_codex_chat_source_access_args(
-    args: &mut Vec<String>,
-    task: &BridgeTask,
-    markdown_path: Option<&Path>,
-) {
+fn push_codex_chat_source_access_args(args: &mut Vec<String>, task: &BridgeTask) {
     if task.task_type != "chatWithPaper" {
-        return;
-    }
-    if let Some(path) = markdown_path {
-        push_parent_add_dir_arg(args, path);
         return;
     }
     if let Some(pdf_path) = task_document_file_path(task) {
         push_parent_add_dir_arg(args, &pdf_path);
-    }
-}
-
-fn markitdown_mcp_candidates() -> Vec<PathBuf> {
-    let home = home_dir();
-    let mut raw = Vec::new();
-    if let Some(value) = env::var_os("MARKITDOWN_MCP_BIN") {
-        raw.push(PathBuf::from(value));
-    }
-    for dir in path_dirs() {
-        raw.push(dir.join("markitdown-mcp"));
-    }
-    raw.push(home.join(".local").join("bin").join("markitdown-mcp"));
-    raw.push(
-        home.join("AppData")
-            .join("Roaming")
-            .join("Python")
-            .join("Scripts")
-            .join("markitdown-mcp"),
-    );
-
-    let mut candidates = Vec::new();
-    for path in raw {
-        for expanded in expand_executable_candidate(path) {
-            if !candidates.contains(&expanded) {
-                candidates.push(expanded);
-            }
-        }
-    }
-    candidates
-}
-
-fn resolve_markitdown_mcp_command() -> AppResult<ResolvedAgentCommand> {
-    let candidates = markitdown_mcp_candidates();
-    let executable = candidates
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .ok_or_else(|| {
-            let searched = candidates
-                .iter()
-                .take(12)
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("MarkItDown MCP server was not found. Searched: {searched}. Set MARKITDOWN_MCP_BIN if needed.")
-        })?;
-
-    #[cfg(windows)]
-    {
-        let extension = executable
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if extension == "cmd" || extension == "bat" {
-            return Ok(ResolvedAgentCommand {
-                command: PathBuf::from("cmd.exe"),
-                args_prefix: vec![
-                    "/C".to_string(),
-                    "call".to_string(),
-                    executable.to_string_lossy().to_string(),
-                ],
-                source: executable,
-            });
-        }
-    }
-
-    Ok(ResolvedAgentCommand {
-        command: executable.clone(),
-        args_prefix: Vec::new(),
-        source: executable,
-    })
-}
-
-fn percent_encode_uri_path(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.as_bytes() {
-        let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~' | '/' | ':') {
-            encoded.push(ch);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-fn path_to_file_uri(path: &Path) -> String {
-    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut value = canonical.to_string_lossy().replace('\\', "/");
-    if let Some(stripped) = value.strip_prefix("//?/UNC/") {
-        value = format!("//{stripped}");
-    } else if let Some(stripped) = value.strip_prefix("//?/") {
-        value = stripped.to_string();
-    }
-
-    if value.starts_with("//") {
-        format!("file:{}", percent_encode_uri_path(&value))
-    } else {
-        format!(
-            "file:///{}",
-            percent_encode_uri_path(value.trim_start_matches('/'))
-        )
-    }
-}
-
-fn send_mcp_message(stdin: &mut impl Write, value: &Value) -> AppResult<()> {
-    let line = serde_json::to_string(value).map_err(|error| error.to_string())?;
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|error| error.to_string())
-}
-
-fn read_mcp_response(reader: &mut impl BufRead, id: i64) -> AppResult<Value> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err(format!(
-                "MarkItDown MCP closed stdout before response id {id}."
-            ));
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if message.get("id").and_then(Value::as_i64) == Some(id) {
-            return Ok(message);
-        }
-    }
-}
-
-fn mcp_error_text(value: &Value) -> String {
-    value
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("detail").and_then(Value::as_str))
-        .unwrap_or("Unknown MCP error")
-        .to_string()
-}
-
-fn mcp_content_text(result: &Value) -> String {
-    result
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|content| {
-            content
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .filter(|text| !text.trim().is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .unwrap_or_default()
-}
-
-fn extract_mcp_tool_text(response: Value) -> AppResult<String> {
-    if let Some(error) = response.get("error") {
-        return Err(mcp_error_text(error));
-    }
-    let result = response
-        .get("result")
-        .ok_or_else(|| "MarkItDown MCP response did not include a result.".to_string())?;
-    let text = mcp_content_text(result);
-    if result.get("isError").and_then(Value::as_bool) == Some(true) {
-        return Err(if text.trim().is_empty() {
-            "MarkItDown MCP returned an error.".to_string()
-        } else {
-            text
-        });
-    }
-    if text.trim().is_empty() {
-        Err("MarkItDown MCP returned empty Markdown.".to_string())
-    } else {
-        Ok(text)
-    }
-}
-
-fn convert_pdf_to_markdown_with_mcp(pdf_path: &Path, root: &Path) -> AppResult<String> {
-    let resolved = resolve_markitdown_mcp_command()?;
-    let mut command = Command::new(&resolved.command);
-    command
-        .args(&resolved.args_prefix)
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = command.spawn().map_err(|error| {
-        format!(
-            "Failed to start MarkItDown MCP server at {}: {error}",
-            resolved.source.to_string_lossy()
-        )
-    })?;
-    let result = (|| {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "MarkItDown MCP stdin was unavailable.".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "MarkItDown MCP stdout was unavailable.".to_string())?;
-        let mut reader = BufReader::new(stdout);
-        send_mcp_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "paper-pilot",
-                        "version": "0.1.0"
-                    }
-                }
-            }),
-        )?;
-        let _ = read_mcp_response(&mut reader, 1)?;
-        send_mcp_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }),
-        )?;
-        send_mcp_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "convert_to_markdown",
-                    "arguments": {
-                        "uri": path_to_file_uri(pdf_path)
-                    }
-                }
-            }),
-        )?;
-        let response = read_mcp_response(&mut reader, 2)?;
-        extract_mcp_tool_text(response)
-    })();
-    let _ = child.kill();
-    let _ = child.wait();
-    result
-}
-
-fn source_fingerprint(path: &Path) -> AppResult<SourceFingerprint> {
-    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
-    let modified = metadata
-        .modified()
-        .unwrap_or(UNIX_EPOCH)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-    Ok(SourceFingerprint {
-        source_path: path.to_string_lossy().to_string(),
-        len: metadata.len(),
-        modified_secs: modified.as_secs(),
-        modified_nanos: modified.subsec_nanos(),
-    })
-}
-
-fn markdown_cache_paths(base: &Path, document_id: &str, fallback_id: &str) -> (PathBuf, PathBuf) {
-    let raw = if document_id.trim().is_empty() {
-        fallback_id
-    } else {
-        document_id
-    };
-    let mut stem = sanitize_file_name(raw);
-    if stem.trim_matches('_').is_empty() {
-        stem = sanitize_file_name(fallback_id);
-    }
-    let markdown_path = base.join("markitdown").join(format!("{stem}.md"));
-    let metadata_path = markdown_path.with_extension("meta.json");
-    (markdown_path, metadata_path)
-}
-
-fn cached_markdown_is_fresh(metadata_path: &Path, fingerprint: &SourceFingerprint) -> bool {
-    fs::read_to_string(metadata_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<SourceFingerprint>(&raw).ok())
-        .as_ref()
-        == Some(fingerprint)
-}
-
-fn prepare_markdown_attachment(
-    base: &Path,
-    root: &Path,
-    task: &BridgeTask,
-) -> AppResult<Option<MarkdownAttachment>> {
-    if task.task_type != "chatWithPaper" {
-        return Ok(None);
-    }
-    let Some(pdf_path) = task_document_file_path(task) else {
-        return Ok(None);
-    };
-    prepare_pdf_markdown_attachment(base, root, &task.document_id, &task.id, &pdf_path)
-}
-
-fn prepare_pdf_markdown_attachment(
-    base: &Path,
-    root: &Path,
-    document_id: &str,
-    fallback_id: &str,
-    pdf_path: &Path,
-) -> AppResult<Option<MarkdownAttachment>> {
-    let pdf_path = if pdf_path.is_absolute() {
-        pdf_path.to_path_buf()
-    } else {
-        root.join(pdf_path)
-    };
-    let is_pdf = pdf_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("pdf"))
-        .unwrap_or(false);
-    if !is_pdf {
-        return Ok(None);
-    }
-    if !pdf_path.exists() {
-        return Err(format!(
-            "PDF file does not exist and cannot be converted to Markdown: {}",
-            pdf_path.to_string_lossy()
-        ));
-    }
-
-    let fingerprint = source_fingerprint(&pdf_path)?;
-    let (markdown_path, metadata_path) = markdown_cache_paths(base, document_id, fallback_id);
-    if markdown_path.exists() && cached_markdown_is_fresh(&metadata_path, &fingerprint) {
-        return Ok(Some(MarkdownAttachment {
-            path: markdown_path,
-            source_path: pdf_path,
-            reused_cache: true,
-        }));
-    }
-
-    if let Some(parent) = markdown_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let markdown = convert_pdf_to_markdown_with_mcp(&pdf_path, root)?;
-    let tmp_path = markdown_path.with_extension("md.tmp");
-    fs::write(&tmp_path, markdown).map_err(|error| error.to_string())?;
-    let _ = fs::remove_file(&markdown_path);
-    fs::rename(&tmp_path, &markdown_path).map_err(|error| error.to_string())?;
-    fs::write(
-        &metadata_path,
-        serde_json::to_vec_pretty(&fingerprint).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-
-    Ok(Some(MarkdownAttachment {
-        path: markdown_path,
-        source_path: pdf_path,
-        reused_cache: false,
-    }))
-}
-
-fn document_markdown_result(
-    document_id: &str,
-    attachment: MarkdownAttachment,
-) -> DocumentMarkdownResult {
-    DocumentMarkdownResult {
-        document_id: document_id.to_string(),
-        markdown_path: attachment.path.to_string_lossy().to_string(),
-        source_path: attachment.source_path.to_string_lossy().to_string(),
-        reused_cache: attachment.reused_cache,
-        converter: "markitdown-mcp".to_string(),
     }
 }
 
@@ -2140,7 +1738,7 @@ fn codex_args(
     root: &Path,
     response_file: &Path,
     image_path: Option<&Path>,
-    markdown_path: Option<&Path>,
+    allow_pdf_access: bool,
 ) -> Vec<String> {
     let model = task
         .model
@@ -2154,7 +1752,9 @@ fn codex_args(
     let mut args = vec!["exec".to_string()];
 
     args.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
-    push_codex_chat_source_access_args(&mut args, task, markdown_path);
+    if allow_pdf_access {
+        push_codex_chat_source_access_args(&mut args, task);
+    }
     args.extend([
         "--sandbox".to_string(),
         "read-only".to_string(),
@@ -2178,7 +1778,12 @@ fn codex_args(
     args
 }
 
-fn claude_args(task: &BridgeTask, root: &Path, markdown_path: Option<&Path>) -> Vec<String> {
+fn claude_args(
+    task: &BridgeTask,
+    root: &Path,
+    allow_resume: bool,
+    allow_pdf_access: bool,
+) -> Vec<String> {
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -2192,10 +1797,12 @@ fn claude_args(task: &BridgeTask, root: &Path, markdown_path: Option<&Path>) -> 
         "--add-dir".to_string(),
         root.to_string_lossy().to_string(),
     ];
-    if let Some(path) = markdown_path {
-        push_parent_add_dir_arg(&mut args, path);
+    if allow_pdf_access && task.task_type == "chatWithPaper" {
+        if let Some(pdf_path) = task_document_file_path(task) {
+            push_parent_add_dir_arg(&mut args, &pdf_path);
+        }
     }
-    if task.task_type == "chatWithPaper" {
+    if allow_resume && task.task_type == "chatWithPaper" {
         if let Some(session_id) = task
             .provider_session_id
             .as_deref()
@@ -2216,55 +1823,8 @@ fn claude_args(task: &BridgeTask, root: &Path, markdown_path: Option<&Path>) -> 
     args
 }
 
-fn markdown_prompt_section(markdown: &MarkdownAttachment) -> String {
-    format!(
-        "Full paper Markdown file path:\n{}\n\nConverted from PDF:\n{}\n\nUse this converted Markdown file as the primary full-paper source. Do not read the PDF directly unless the Markdown file is missing or obviously incomplete.",
-        markdown.path.to_string_lossy(),
-        markdown.source_path.to_string_lossy()
-    )
-}
-
-fn prompt_with_markdown_attachment(
-    prompt: String,
-    task: &BridgeTask,
-    markdown: &MarkdownAttachment,
-) -> String {
-    let prompt = prompt
-        .replace(
-            "Use the PDF file path below as the primary source and inspect the entire paper when the question requires cross-page synthesis.",
-            "Use the converted Markdown file path below as the primary source and inspect the entire paper when the question requires cross-page synthesis.",
-        )
-        .replace(
-            "If the PDF cannot be read directly, say that clearly and then answer only from any provided extracted page capsules.",
-            "If the converted Markdown file cannot be read directly, say that clearly and then answer only from any provided extracted page capsules.",
-        )
-        .replace(
-            "using only the provided PDF evidence",
-            "using only the provided converted Markdown/paper evidence",
-        )
-        .replace(
-            "based only on provided PDF evidence",
-            "based only on provided converted Markdown/paper evidence",
-        );
-    let section = markdown_prompt_section(markdown);
-    if let Some(pdf_path) = task_document_file_path(task) {
-        let old = format!("Full PDF file path:\n{}", pdf_path.to_string_lossy());
-        if prompt.contains(&old) {
-            return prompt.replace(&old, &section);
-        }
-    }
-    format!("{prompt}\n\n{section}")
-}
-
-fn agent_stdin_prompt(
-    task: &BridgeTask,
-    image_path: Option<&Path>,
-    markdown: Option<&MarkdownAttachment>,
-) -> String {
+fn agent_stdin_prompt(task: &BridgeTask, image_path: Option<&Path>) -> String {
     let mut prompt = task_prompt(task);
-    if let Some(markdown) = markdown {
-        prompt = prompt_with_markdown_attachment(prompt, task, markdown);
-    }
     if task.provider == "claude-code" {
         if let Some(path) = image_path {
             prompt.push_str(&format!(
@@ -2274,6 +1834,268 @@ fn agent_stdin_prompt(
         }
     }
     prompt
+}
+
+fn extract_json_object(text: &str) -> AppResult<Value> {
+    let trimmed = text.trim();
+    let fenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|value| value.trim())
+        .and_then(|value| value.strip_suffix("```").map(str::trim))
+        .unwrap_or(trimmed);
+    if let Ok(value) = serde_json::from_str::<Value>(fenced) {
+        return Ok(value);
+    }
+    let start = fenced
+        .find('{')
+        .ok_or_else(|| "No JSON object found in agent output.".to_string())?;
+    let end = fenced
+        .rfind('}')
+        .ok_or_else(|| "No complete JSON object found in agent output.".to_string())?;
+    serde_json::from_str::<Value>(&fenced[start..=end]).map_err(|error| error.to_string())
+}
+
+fn planner_prompt(task: &BridgeTask, forced_mode: Option<&str>) -> String {
+    let question = task_payload_string(task, "question");
+    let document_title = task
+        .payload
+        .get("document")
+        .and_then(|document| document.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mode_instruction = if forced_mode == Some("fast") {
+        "The mode is forced to fast. Return fast and include retrievalQueries."
+    } else {
+        "Choose deep if answering requires directly inspecting equations, figures, tables, algorithms, visual layout, or complex cross-page reasoning in the original PDF. Choose fast if text retrieval evidence should be enough."
+    };
+    format!(
+        "Convert the user's paper question into English and choose the answer mode.\n\n{mode_instruction}\n\nReturn only JSON. Do not include a reason.\nFor fast: {{\"englishQuestion\": string, \"mode\": \"fast\", \"retrievalQueries\": string[]}}\nFor deep: {{\"englishQuestion\": string, \"mode\": \"deep\"}}\n\nDocument title: {}\nUser question:\n{}",
+        compact_for_prompt(document_title, 500),
+        compact_for_prompt(&question, 3000)
+    )
+}
+
+fn normalize_planner_result(
+    value: Value,
+    forced_mode: Option<&str>,
+    fallback_question: &str,
+) -> Value {
+    let mut english_question = json_string(&value, "englishQuestion");
+    if english_question.is_empty() {
+        english_question = fallback_question.to_string();
+    }
+    let mut mode = json_string(&value, "mode").to_ascii_lowercase();
+    if let Some(forced) = forced_mode {
+        mode = forced.to_string();
+    }
+    if mode != "deep" {
+        mode = "fast".to_string();
+    }
+    let mut output = json!({
+        "englishQuestion": english_question,
+        "mode": mode,
+    });
+    if output.get("mode").and_then(Value::as_str) == Some("fast") {
+        let queries = value
+            .get("retrievalQueries")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .take(6)
+                    .map(|item| Value::String(item.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| vec![Value::String(fallback_question.to_string())]);
+        output["retrievalQueries"] = Value::Array(queries);
+    }
+    output
+}
+
+fn direct_deep_prompt(
+    task: &BridgeTask,
+    english_question: &str,
+    original_question: &str,
+) -> String {
+    let pdf_path = task_document_file_path(task)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let context = task
+        .payload
+        .get("documentContextPack")
+        .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
+        .unwrap_or_default();
+    format!(
+        "You are Paper Pilot, a private academic PDF research assistant.\n\nWrite the final answer in the same language as the original user question. Use Markdown LaTeX for math: inline `$...$`, display `$$...$$`.\n\nUse the original PDF file as the primary source. Inspect the entire paper when the question requires cross-page synthesis. Cite factual claims with page markers like (p. 12). If a page number cannot be verified, do not invent it.\n\nFull PDF file path:\n{}\n\nOriginal user question:\n{}\n\nEnglish inspection question:\n{}\n\nDocument Context Pack (navigation aid only):\n{}",
+        pdf_path,
+        compact_for_prompt(original_question, 3000),
+        compact_for_prompt(english_question, 3000),
+        compact_for_prompt(&context, 12000)
+    )
+}
+
+fn evidence_text_for_prompt(evidence: &[Value]) -> String {
+    evidence
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let page = item
+                .get("pageNumber")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let score = item
+                .get("score")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+            format!(
+                "[{}] p.{} score={:.3}\n{}",
+                index + 1,
+                page,
+                score,
+                compact_for_prompt(text, 1400)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn fast_answer_prompt(planner: &Value, retrieval: &Value, original_question: &str) -> String {
+    let english_question = json_string(planner, "englishQuestion");
+    let evidence = retrieval
+        .get("evidence")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    format!(
+        "Answer the paper question using only the retrieved evidence below.\n\nReturn only JSON with this exact shape: {{\"answerMarkdown\": string, \"evidenceSufficient\": boolean}}\n\nRules:\n- Do not use model memory or the PDF path.\n- Cite every factual claim with page markers like (p. 12), using only page numbers shown in the evidence.\n- If the evidence only partially answers the question, still write the best evidence-based answer and set evidenceSufficient to false.\n- If evidence is empty or unrelated, answer briefly from the lack of evidence and set evidenceSufficient to false.\n- Write answerMarkdown in the same language as the original user question.\n\nOriginal user question:\n{}\n\nEnglish question:\n{}\n\nRetrieved evidence:\n{}",
+        compact_for_prompt(original_question, 3000),
+        compact_for_prompt(&english_question, 3000),
+        evidence_text_for_prompt(&evidence)
+    )
+}
+
+fn run_agent_stage(
+    task: &BridgeTask,
+    resolved: &ResolvedAgentCommand,
+    root: &Path,
+    prompt: &str,
+    response_file: &Path,
+    log_path: &Path,
+    error_log_path: &Path,
+    allow_resume: bool,
+    allow_pdf_access: bool,
+) -> AppResult<(i32, String, String, Option<String>, String)> {
+    let args = if task.provider == "claude-code" {
+        claude_args(task, root, allow_resume, allow_pdf_access)
+    } else {
+        codex_args(task, root, response_file, None, allow_pdf_access)
+    };
+    let (exit_code, stdout, stderr) = run_agent_command(
+        resolved,
+        &args,
+        Some(prompt),
+        root,
+        log_path,
+        error_log_path,
+    )?;
+    let (session_id, content) = if task.provider == "claude-code" {
+        parse_claude_output(&stdout)
+    } else {
+        parse_codex_output(&stdout, response_file)
+    };
+    Ok((exit_code, stdout, stderr, session_id, content))
+}
+
+fn python_command_candidates() -> Vec<ResolvedAgentCommand> {
+    let mut candidates = Vec::new();
+    candidates.push(ResolvedAgentCommand {
+        command: PathBuf::from("python"),
+        args_prefix: Vec::new(),
+        source: PathBuf::from("python"),
+    });
+    candidates.push(ResolvedAgentCommand {
+        command: PathBuf::from("py"),
+        args_prefix: vec!["-3".to_string()],
+        source: PathBuf::from("py -3"),
+    });
+    candidates
+}
+
+fn run_sparse_retrieval(
+    root: &Path,
+    base: &Path,
+    task: &BridgeTask,
+    planner: &Value,
+) -> AppResult<Value> {
+    let script = root
+        .join("retrieval-adapter")
+        .join("paperqa_sparse_retrieve.py");
+    if !script.exists() {
+        return Err(format!(
+            "Sparse retrieval adapter not found: {}",
+            script.to_string_lossy()
+        ));
+    }
+    let queries = planner
+        .get("retrievalQueries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let input = json!({
+        "documentId": &task.document_id,
+        "englishQuestion": json_string(planner, "englishQuestion"),
+        "queries": queries,
+        "pages": task.payload.get("pages").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "cacheDir": base.join("retrieval-cache").to_string_lossy().to_string(),
+        "chunkSize": 1100,
+        "overlap": 220,
+        "maxChunks": 6,
+    });
+    let work_dir = base.join("retrieval");
+    fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
+    let input_path = work_dir.join(format!("{}.retrieval.input.json", task.id));
+    let output_path = work_dir.join(format!("{}.retrieval.output.json", task.id));
+    write_json_file(&input_path, &input)?;
+
+    let mut last_error = String::new();
+    for resolved in python_command_candidates() {
+        let mut command = Command::new(&resolved.command);
+        command
+            .args(&resolved.args_prefix)
+            .arg(&script)
+            .arg("--input")
+            .arg(&input_path)
+            .arg("--output")
+            .arg(&output_path)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let raw = fs::read_to_string(&output_path).map_err(|error| error.to_string())?;
+                return serde_json::from_str::<Value>(&raw).map_err(|error| error.to_string());
+            }
+            Ok(output) => {
+                last_error = decode_process_bytes(&output.stderr);
+                if last_error.trim().is_empty() {
+                    last_error = decode_process_bytes(&output.stdout);
+                }
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+    }
+    Err(format!("Sparse retrieval failed: {last_error}"))
 }
 
 fn collect_text_parts(value: &Value) -> Vec<String> {
@@ -2501,6 +2323,243 @@ fn finish_agent_task(
     Ok(())
 }
 
+fn run_planned_chat_task(
+    root: &Path,
+    base: &Path,
+    task_file: &Path,
+    task: &BridgeTask,
+    resolved: &ResolvedAgentCommand,
+    final_log_path: &Path,
+) -> AppResult<Value> {
+    let requested_mode = task_ask_mode(task);
+    let forced_mode = if requested_mode == "fast" {
+        Some("fast")
+    } else {
+        None
+    };
+    let original_question = task_payload_string(task, "question");
+    let plan_response_file = base
+        .join("logs")
+        .join(format!("{}.planner.response.md", task.id));
+    let plan_log_path = base
+        .join("logs")
+        .join(format!("{}.planner.out.log", task.id));
+    let plan_error_log_path = base
+        .join("logs")
+        .join(format!("{}.planner.err.log", task.id));
+    let plan_prompt = planner_prompt(task, forced_mode);
+    let (plan_exit_code, _plan_stdout, plan_stderr, _plan_session_id, plan_content) =
+        run_agent_stage(
+            task,
+            resolved,
+            root,
+            &plan_prompt,
+            &plan_response_file,
+            &plan_log_path,
+            &plan_error_log_path,
+            false,
+            false,
+        )?;
+    if plan_content.trim().is_empty() {
+        let message = if plan_stderr.trim().is_empty() {
+            format!("Planner exited with code {plan_exit_code} and returned no JSON.")
+        } else {
+            plan_stderr
+        };
+        let metadata = json!({
+            "id": &task.id,
+            "taskType": &task.task_type,
+            "documentId": &task.document_id,
+            "provider": &task.provider,
+            "model": &task.model,
+            "providerSessionId": &task.provider_session_id,
+            "status": "failed",
+            "output": message,
+            "payload": {
+                "askMode": requested_mode,
+                "provider": &task.provider,
+                "model": &task.model,
+                "plannerExitCode": plan_exit_code,
+                "plannerLogPath": plan_log_path,
+                "plannerErrorLogPath": plan_error_log_path,
+                "finalLogPath": final_log_path,
+            },
+            "savedAt": now(),
+        });
+        finish_agent_task(base, task_file, task, metadata.clone())?;
+        return Ok(metadata);
+    }
+    let planner = normalize_planner_result(
+        extract_json_object(&plan_content)?,
+        forced_mode,
+        &original_question,
+    );
+    let english_question = json_string(&planner, "englishQuestion");
+    let planned_mode = json_string(&planner, "mode");
+    if planned_mode == "deep" {
+        let deep_response_file = base
+            .join("logs")
+            .join(format!("{}.deep.response.md", task.id));
+        let deep_log_path = base.join("logs").join(format!("{}.deep.out.log", task.id));
+        let deep_error_log_path = base.join("logs").join(format!("{}.deep.err.log", task.id));
+        let prompt = direct_deep_prompt(task, &english_question, &original_question);
+        let (exit_code, stdout, stderr, new_session_id, content) = run_agent_stage(
+            task,
+            resolved,
+            root,
+            &prompt,
+            &deep_response_file,
+            &deep_log_path,
+            &deep_error_log_path,
+            false,
+            true,
+        )?;
+        let provider_session_id = new_session_id.or(task.provider_session_id.clone());
+        let saw_agent_error_event = task.provider == "codex-cli"
+            && stdout.lines().any(|line| {
+                line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"")
+            });
+        let status = if exit_code == 0 && !content.trim().is_empty() {
+            "complete"
+        } else if !content.trim().is_empty() && !saw_agent_error_event {
+            "partial"
+        } else {
+            "failed"
+        };
+        let output = if content.trim().is_empty() {
+            if stderr.trim().is_empty() {
+                format!(
+                    "{} exited with code {exit_code} and returned no assistant message.",
+                    task.provider
+                )
+            } else {
+                stderr
+            }
+        } else {
+            content
+        };
+        let metadata = json!({
+            "id": &task.id,
+            "taskType": &task.task_type,
+            "documentId": &task.document_id,
+            "provider": &task.provider,
+            "model": &task.model,
+            "providerSessionId": &provider_session_id,
+            "status": status,
+            "output": output,
+            "payload": {
+                "askMode": "deep",
+                "requestedAskMode": requested_mode,
+                "planner": planner,
+                "englishQuestion": english_question,
+                "originalQuestion": original_question,
+                "provider": &task.provider,
+                "model": &task.model,
+                "exitCode": exit_code,
+                "plannerLogPath": plan_log_path,
+                "plannerErrorLogPath": plan_error_log_path,
+                "logPath": deep_log_path,
+                "errorLogPath": deep_error_log_path,
+                "finalLogPath": final_log_path,
+                "responseFile": deep_response_file,
+            },
+            "savedAt": now(),
+        });
+        finish_agent_task(base, task_file, task, metadata.clone())?;
+        return Ok(metadata);
+    }
+
+    let retrieval = run_sparse_retrieval(root, base, task, &planner)?;
+    let answer_response_file = base
+        .join("logs")
+        .join(format!("{}.fast-answer.response.md", task.id));
+    let answer_log_path = base
+        .join("logs")
+        .join(format!("{}.fast-answer.out.log", task.id));
+    let answer_error_log_path = base
+        .join("logs")
+        .join(format!("{}.fast-answer.err.log", task.id));
+    let answer_prompt = fast_answer_prompt(&planner, &retrieval, &original_question);
+    let (answer_exit_code, answer_stdout, answer_stderr, new_session_id, answer_content) =
+        run_agent_stage(
+            task,
+            resolved,
+            root,
+            &answer_prompt,
+            &answer_response_file,
+            &answer_log_path,
+            &answer_error_log_path,
+            false,
+            false,
+        )?;
+    let provider_session_id = new_session_id.or(task.provider_session_id.clone());
+    let parsed_answer = extract_json_object(&answer_content).unwrap_or_else(|_| {
+        json!({
+            "answerMarkdown": answer_content,
+            "evidenceSufficient": true,
+        })
+    });
+    let answer_markdown = json_string(&parsed_answer, "answerMarkdown");
+    let evidence_sufficient = parsed_answer
+        .get("evidenceSufficient")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let saw_agent_error_event = task.provider == "codex-cli"
+        && answer_stdout.lines().any(|line| {
+            line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"")
+        });
+    let status = if answer_exit_code == 0 && !answer_markdown.trim().is_empty() {
+        "complete"
+    } else if !answer_markdown.trim().is_empty() && !saw_agent_error_event {
+        "partial"
+    } else {
+        "failed"
+    };
+    let output = if answer_markdown.trim().is_empty() {
+        if answer_stderr.trim().is_empty() {
+            format!(
+                "{} exited with code {answer_exit_code} and returned no fast answer.",
+                task.provider
+            )
+        } else {
+            answer_stderr
+        }
+    } else {
+        answer_markdown
+    };
+    let metadata = json!({
+        "id": &task.id,
+        "taskType": &task.task_type,
+        "documentId": &task.document_id,
+        "provider": &task.provider,
+        "model": &task.model,
+        "providerSessionId": &provider_session_id,
+        "status": status,
+        "output": output,
+        "payload": {
+            "askMode": "fast",
+            "requestedAskMode": requested_mode,
+            "planner": planner,
+            "retrieval": retrieval,
+            "englishQuestion": english_question,
+            "originalQuestion": original_question,
+            "evidenceSufficient": evidence_sufficient,
+            "provider": &task.provider,
+            "model": &task.model,
+            "exitCode": answer_exit_code,
+            "plannerLogPath": plan_log_path,
+            "plannerErrorLogPath": plan_error_log_path,
+            "logPath": answer_log_path,
+            "errorLogPath": answer_error_log_path,
+            "finalLogPath": final_log_path,
+            "responseFile": answer_response_file,
+        },
+        "savedAt": now(),
+    });
+    finish_agent_task(base, task_file, task, metadata.clone())?;
+    Ok(metadata)
+}
+
 fn run_agent_task(
     root: &Path,
     base: &Path,
@@ -2593,51 +2652,17 @@ fn run_agent_task(
         }
     };
 
-    let markdown_attachment = match prepare_markdown_attachment(base, root, &task) {
-        Ok(attachment) => attachment,
-        Err(error) => {
-            let error_message = format!("PDF to Markdown conversion failed: {error}");
-            let metadata = json!({
-                "id": &task.id,
-                "taskType": &task.task_type,
-                "documentId": &task.document_id,
-                "provider": &task.provider,
-                "model": &task.model,
-                "providerSessionId": &task.provider_session_id,
-                "status": "failed",
-                "output": error_message.clone(),
-                "payload": {
-                    "provider": &task.provider,
-                    "model": &task.model,
-                    "providerSessionId": &task.provider_session_id,
-                    "error": error_message,
-                    "markdownConverter": "markitdown-mcp",
-                    "logPath": log_path,
-                    "errorLogPath": error_log_path,
-                    "finalLogPath": final_log_path,
-                },
-                "savedAt": now(),
-            });
-            finish_agent_task(base, task_file, &task, metadata.clone())?;
-            return Ok(metadata);
-        }
-    };
-    let markdown_path = markdown_attachment
-        .as_ref()
-        .map(|attachment| attachment.path.as_path());
+    let ask_mode = task_ask_mode(&task);
+    if task.task_type == "chatWithPaper" && (ask_mode == "auto" || ask_mode == "fast") {
+        return run_planned_chat_task(root, base, task_file, &task, &resolved, final_log_path);
+    }
+
     let args = if task.provider == "claude-code" {
-        claude_args(&task, root, markdown_path)
+        claude_args(&task, root, true, true)
     } else {
-        codex_args(
-            &task,
-            root,
-            &response_file,
-            image_path.as_deref(),
-            markdown_path,
-        )
+        codex_args(&task, root, &response_file, image_path.as_deref(), true)
     };
-    let stdin_prompt =
-        agent_stdin_prompt(&task, image_path.as_deref(), markdown_attachment.as_ref());
+    let stdin_prompt = agent_stdin_prompt(&task, image_path.as_deref());
     let command_display = format!(
         "{} <prompt via stdin>",
         command_line_display(&resolved, &args)
@@ -2691,6 +2716,11 @@ fn run_agent_task(
         "status": status,
         "output": output,
         "payload": {
+            "askMode": task_ask_mode(&task),
+            "englishQuestion": task_payload_string(&task, "englishQuestion"),
+            "originalQuestion": task_payload_string(&task, "originalQuestion"),
+            "triggeredBy": task_payload_string(&task, "triggeredBy"),
+            "parentResultId": task_payload_string(&task, "parentResultId"),
             "provider": &task.provider,
             "model": &task.model,
             "providerSessionId": &provider_session_id,
@@ -2703,10 +2733,6 @@ fn run_agent_task(
             "finalLogPath": final_log_path,
             "responseFile": response_file,
             "imagePath": image_path,
-            "markdownPath": markdown_attachment.as_ref().map(|attachment| attachment.path.clone()),
-            "markdownSourcePath": markdown_attachment.as_ref().map(|attachment| attachment.source_path.clone()),
-            "markdownCacheReused": markdown_attachment.as_ref().map(|attachment| attachment.reused_cache),
-            "markdownConverter": markdown_attachment.as_ref().map(|_| "markitdown-mcp"),
         },
         "savedAt": now(),
     });
@@ -2948,6 +2974,73 @@ mod tests {
             "명령줄이 너무 깁니다. 다시 실행하면 긴 프롬프트를 stdin으로 전달해 처리합니다."
         );
     }
+    fn bridge_task_with_ask_mode(ask_mode: &str) -> BridgeTask {
+        BridgeTask {
+            id: "task-test".to_string(),
+            task_type: "chatWithPaper".to_string(),
+            document_id: "doc-test".to_string(),
+            provider: "codex-cli".to_string(),
+            model: None,
+            reasoning_effort: None,
+            provider_session_id: None,
+            payload: json!({
+                "askMode": ask_mode,
+                "document": {
+                    "filePath": "C:/papers/test.pdf"
+                }
+            }),
+            created_at: now(),
+            bridge_dir: "bridge".to_string(),
+            file_path: "bridge/outbox/task-test.json".to_string(),
+        }
+    }
+
+    #[test]
+    fn direct_chat_adds_pdf_access_args() {
+        let task = bridge_task_with_ask_mode("direct");
+        let mut args = Vec::new();
+        push_codex_chat_source_access_args(&mut args, &task);
+        assert_eq!(args, vec!["--add-dir".to_string(), "C:/papers".to_string()]);
+    }
+
+    #[test]
+    fn extracts_json_from_fenced_agent_output() {
+        let parsed = extract_json_object(
+            "```json\n{\"mode\":\"fast\",\"englishQuestion\":\"What is it?\"}\n```",
+        )
+        .expect("fenced JSON should parse");
+        assert_eq!(parsed["mode"], "fast");
+        assert_eq!(parsed["englishQuestion"], "What is it?");
+    }
+
+    #[test]
+    fn forced_fast_planner_result_adds_retrieval_query() {
+        let normalized = normalize_planner_result(
+            json!({
+                "englishQuestion": "How does the method work?",
+                "mode": "deep"
+            }),
+            Some("fast"),
+            "fallback query",
+        );
+        assert_eq!(normalized["mode"], "fast");
+        assert_eq!(normalized["englishQuestion"], "How does the method work?");
+        assert_eq!(normalized["retrievalQueries"][0], "fallback query");
+    }
+
+    #[test]
+    fn fast_codex_stage_does_not_add_pdf_access_args() {
+        let task = bridge_task_with_ask_mode("fast");
+        let args = codex_args(
+            &task,
+            Path::new("C:/workspace"),
+            Path::new("C:/workspace/response.md"),
+            None,
+            false,
+        );
+        assert!(!args.iter().any(|arg| arg == "--add-dir"));
+        assert!(args.iter().any(|arg| arg == "read-only"));
+    }
 }
 
 pub fn run() {
@@ -2970,7 +3063,6 @@ pub fn run() {
             load_app_state,
             import_pdf,
             read_document_bytes,
-            ensure_document_markdown,
             update_document,
             delete_document,
             save_pages,

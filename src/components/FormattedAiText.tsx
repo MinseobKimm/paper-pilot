@@ -155,24 +155,40 @@ export function InlinePageCitationText(props: { text: string; onPageCitation?: (
     return <>{props.text}</>;
   }
   const chunks: ReactNode[] = [];
-  const pattern = /(\((?:p|page)\.?\s*(\d+)\)|\b(?:p|page)\.?\s*(\d+)\b)/gi;
+  const pattern =
+    /(\((?:p|pp|page|pages)\.?\s*(\d+)\)\s*(?:-|–|—|to)\s*(\d+)\)|\((?:p|pp|page|pages)\.?\s*(\d+)(?:\s*(?:-|–|—|to)\s*(\d+))?\)|\b(?:p|pp|page|pages)\.?\s*(\d+)(?:\s*(?:-|–|—|to)\s*(\d+))?\b)/gi;
   let cursor = 0;
   for (const match of props.text.matchAll(pattern)) {
     const index = match.index ?? 0;
-    const page = Number(match[2] ?? match[3]);
+    const startPage = Number(match[2] ?? match[4] ?? match[6]);
+    const endPage = Number(match[3] ?? match[5] ?? match[7] ?? startPage);
+    if (!Number.isFinite(startPage) || startPage <= 0) {
+      continue;
+    }
+    const citationPages =
+      Number.isFinite(endPage) && endPage > startPage && endPage - startPage <= 20
+        ? Array.from({ length: endPage - startPage + 1 }, (_, offset) => startPage + offset)
+        : [startPage];
     if (index > cursor) {
       chunks.push(props.text.slice(cursor, index));
     }
     chunks.push(
-      <button
-        key={`${match[0]}-${index}`}
-        type="button"
-        className="page-citation-link"
-        title="Go to page"
-        onClick={() => props.onPageCitation?.(page)}
-      >
-        {`(p. ${page})`}
-      </button>,
+      <span key={`${match[0]}-${index}`} className="page-citation-group">
+        {citationPages.map((page, pageIndex) => (
+          <span key={`${match[0]}-${index}-${page}`}>
+            {pageIndex === 0 ? "(" : "-"}
+            <button
+              type="button"
+              className="page-citation-link"
+              title={`Go to page ${page}`}
+              onClick={() => props.onPageCitation?.(page)}
+            >
+              {pageIndex === 0 ? `p. ${page}` : String(page)}
+            </button>
+            {pageIndex === citationPages.length - 1 ? ")" : ""}
+          </span>
+        ))}
+      </span>,
     );
     cursor = index + match[0].length;
   }

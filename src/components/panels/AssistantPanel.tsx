@@ -1,12 +1,22 @@
+import { useEffect, useRef, useState } from "react";
 import { Copy, MessageSquareText, Search, Send, Trash2 } from "../icons";
 import { FormattedAiText } from "../FormattedAiText";
 import { aiRuntimeLabel } from "../../lib/aiPreferences";
-import { formatResultTime, getReadableAiOutput, taskTitle } from "../../lib/aiResults";
+import {
+  chatAskModeKind,
+  chatAskModeLabel,
+  formatResultTime,
+  getReadableAiOutput,
+  resultTokenEstimateText,
+  stripChatAskPrefix,
+  taskTitle,
+} from "../../lib/aiResults";
 import { annotationFilters, explanationResultId, explanationTasks } from "../../lib/annotationHelpers";
 import { useUiStrings } from "../../lib/uiStrings";
 import type { AiResultRecord, AiTaskType, AnnotationRecord } from "../../types";
 
 export type ReaderAssistantMode = "study" | "quotes";
+type ChatAskMode = "auto" | "fast" | "deep";
 
 export function AssistantPanel(props: {
   annotations: AnnotationRecord[];
@@ -36,12 +46,12 @@ export function AssistantPanel(props: {
             value={props.chatDraft}
             onChange={props.setChatDraft}
             modelLabel={aiRuntimeLabel(props.settings, ui)}
-            onSend={() => {
+            onSend={(askMode) => {
               const question = props.chatDraft.trim();
               if (!question) {
                 return;
               }
-              props.onQueueTask("chatWithPaper", { question });
+              props.onQueueTask("chatWithPaper", { question, askMode });
               props.setChatDraft("");
             }}
           />
@@ -67,6 +77,7 @@ function ChatThread(props: {
   onCopy: (text: string, label: string) => void;
 }) {
   const ui = useUiStrings();
+  const threadRef = useRef<HTMLElement | null>(null);
   const chatResults = props.results
     .filter((result) => result.taskType.toString() === "chatWithPaper")
     .slice()
@@ -75,8 +86,19 @@ function ChatThread(props: {
       const bTime = new Date(b.createdAt).getTime();
       return (Number.isNaN(aTime) ? 0 : aTime) - (Number.isNaN(bTime) ? 0 : bTime);
     });
+  const scrollKey = chatResults.map((result) => `${result.id}:${result.status}:${result.outputText.length}`).join("|");
+  useEffect(() => {
+    const node = threadRef.current;
+    if (!node) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [scrollKey]);
   return (
-    <section className="chat-thread" aria-label={ui.askAi}>
+    <section ref={threadRef} className="chat-thread" aria-label={ui.askAi}>
       {chatResults.length === 0 && (
         <div className="chat-thread-empty">
           <MessageSquareText size={20} />
@@ -86,11 +108,20 @@ function ChatThread(props: {
       )}
       {chatResults.map((result) => {
         const isPending = result.status === "pending";
-        const answer = isPending ? ui.aiPendingAnswer : getReadableAiOutput(result, ui);
+        const question = stripChatAskPrefix(result.inputText);
+        const modeKind = chatAskModeKind(result.inputText);
+        const modeLabel = chatAskModeLabel(result.inputText);
+        const answer =
+          isPending && modeKind === "deep"
+            ? "Deep Read가 원본 PDF를 확인하는 중입니다."
+            : isPending
+              ? ui.aiPendingAnswer
+              : getReadableAiOutput(result, ui);
+        const tokenEstimate = resultTokenEstimateText(result);
         return (
           <article key={result.id} className="chat-turn">
             <div className="chat-bubble user">
-              <p>{result.inputText}</p>
+              <p>{question || result.inputText}</p>
             </div>
             <div
               className={`chat-bubble assistant ${result.status}`}
@@ -98,7 +129,8 @@ function ChatThread(props: {
               onMouseLeave={() => props.onHoverSource(null)}
             >
               <div className="chat-bubble-head">
-                <span>{formatResultTime(result.createdAt)}</span>
+                {modeLabel && <span className={`chat-mode-pill ${modeKind}`}>{modeLabel}</span>}
+                <span className="chat-turn-meta">{[formatResultTime(result.createdAt), tokenEstimate].filter(Boolean).join(" / ")}</span>
                 {!isPending && (
                   <button title={ui.copy} onClick={() => props.onCopy(answer, ui.askAi)}>
                     <Copy size={13} />
@@ -176,14 +208,46 @@ function QuoteCardPanel(props: {
   );
 }
 
-function ChatComposer(props: { value: string; modelLabel: string; onChange: (value: string) => void; onSend: () => void }) {
+function ChatComposer(props: { value: string; modelLabel: string; onChange: (value: string) => void; onSend: (mode: ChatAskMode) => void }) {
   const ui = useUiStrings();
+  const [askMode, setAskMode] = useState<ChatAskMode>("auto");
+  const send = () => {
+    props.onSend(askMode);
+  };
   return (
     <div className="assistant-composer">
-      <textarea value={props.value} onChange={(event) => props.onChange(event.target.value)} placeholder={ui.askAnything} />
+      <div className="ask-mode-tabs" role="tablist" aria-label="Ask AI mode">
+        {[
+          ["auto", "Auto"],
+          ["fast", "Fast"],
+          ["deep", "Deep"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            className={askMode === value ? "active" : ""}
+            aria-selected={askMode === value}
+            onClick={() => setAskMode(value as ChatAskMode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <textarea
+        value={props.value}
+        onChange={(event) => props.onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+            return;
+          }
+          event.preventDefault();
+          send();
+        }}
+        placeholder={ui.askAnything}
+      />
       <div className="composer-footer">
         <span className="composer-model-chip">{props.modelLabel}</span>
-        <button className="send-round" title={ui.send} onClick={props.onSend}><Send size={15} /></button>
+        <button className="send-round" title={ui.send} onClick={send}><Send size={15} /></button>
       </div>
     </div>
   );
