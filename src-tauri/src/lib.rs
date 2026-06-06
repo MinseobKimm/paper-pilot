@@ -1738,6 +1738,7 @@ fn codex_args(
     root: &Path,
     response_file: &Path,
     image_path: Option<&Path>,
+    allow_resume: bool,
     allow_pdf_access: bool,
 ) -> Vec<String> {
     let model = task
@@ -1749,8 +1750,15 @@ fn codex_args(
         .as_deref()
         .map(str::trim)
         .filter(|value| matches!(*value, "none" | "low" | "medium" | "high" | "xhigh"));
+    let resume_session_id = if allow_resume && task.task_type == "chatWithPaper" {
+        task.provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
     let mut args = vec!["exec".to_string()];
-
     args.extend(["--json".to_string(), "--skip-git-repo-check".to_string()]);
     if allow_pdf_access {
         push_codex_chat_source_access_args(&mut args, task);
@@ -1774,6 +1782,11 @@ fn codex_args(
     if let Some(path) = image_path {
         args.push("--image".to_string());
         args.push(path.to_string_lossy().to_string());
+    }
+    if let Some(session_id) = resume_session_id {
+        args.push("resume".to_string());
+        args.push(session_id.to_string());
+        args.push("-".to_string());
     }
     args
 }
@@ -1994,7 +2007,14 @@ fn run_agent_stage(
     let args = if task.provider == "claude-code" {
         claude_args(task, root, allow_resume, allow_pdf_access)
     } else {
-        codex_args(task, root, response_file, None, allow_pdf_access)
+        codex_args(
+            task,
+            root,
+            response_file,
+            None,
+            allow_resume,
+            allow_pdf_access,
+        )
     };
     let (exit_code, stdout, stderr) = run_agent_command(
         resolved,
@@ -2323,6 +2343,11 @@ fn finish_agent_task(
     Ok(())
 }
 
+fn write_agent_progress(base: &Path, task: &BridgeTask, metadata: Value) -> AppResult<()> {
+    let inbox_file = base.join("inbox").join(format!("{}.json", task.id));
+    write_json_file(&inbox_file, &metadata)
+}
+
 fn run_planned_chat_task(
     root: &Path,
     base: &Path,
@@ -2396,6 +2421,39 @@ fn run_planned_chat_task(
     );
     let english_question = json_string(&planner, "englishQuestion");
     let planned_mode = json_string(&planner, "mode");
+    let progress_output = if planned_mode == "deep" {
+        "Deep is checking the original PDF."
+    } else {
+        "Fast Answer is retrieving page evidence."
+    };
+    write_agent_progress(
+        base,
+        task,
+        json!({
+            "id": &task.id,
+            "taskType": &task.task_type,
+            "documentId": &task.document_id,
+            "provider": &task.provider,
+            "model": &task.model,
+            "providerSessionId": &task.provider_session_id,
+            "status": "pending",
+            "output": progress_output,
+            "payload": {
+                "askMode": &planned_mode,
+                "requestedAskMode": &requested_mode,
+                "planner": planner.clone(),
+                "englishQuestion": &english_question,
+                "originalQuestion": &original_question,
+                "provider": &task.provider,
+                "model": &task.model,
+                "stage": "planned",
+                "plannerLogPath": plan_log_path,
+                "plannerErrorLogPath": plan_error_log_path,
+                "finalLogPath": final_log_path,
+            },
+            "savedAt": now(),
+        }),
+    )?;
     if planned_mode == "deep" {
         let deep_response_file = base
             .join("logs")
@@ -2411,7 +2469,7 @@ fn run_planned_chat_task(
             &deep_response_file,
             &deep_log_path,
             &deep_error_log_path,
-            false,
+            true,
             true,
         )?;
         let provider_session_id = new_session_id.or(task.provider_session_id.clone());
@@ -2660,7 +2718,14 @@ fn run_agent_task(
     let args = if task.provider == "claude-code" {
         claude_args(&task, root, true, true)
     } else {
-        codex_args(&task, root, &response_file, image_path.as_deref(), true)
+        codex_args(
+            &task,
+            root,
+            &response_file,
+            image_path.as_deref(),
+            true,
+            true,
+        )
     };
     let stdin_prompt = agent_stdin_prompt(&task, image_path.as_deref());
     let command_display = format!(
@@ -2974,7 +3039,10 @@ mod tests {
             "명령줄이 너무 깁니다. 다시 실행하면 긴 프롬프트를 stdin으로 전달해 처리합니다."
         );
     }
-    fn bridge_task_with_ask_mode(ask_mode: &str) -> BridgeTask {
+    fn bridge_task_with_ask_mode_and_session(
+        ask_mode: &str,
+        provider_session_id: Option<&str>,
+    ) -> BridgeTask {
         BridgeTask {
             id: "task-test".to_string(),
             task_type: "chatWithPaper".to_string(),
@@ -2982,7 +3050,7 @@ mod tests {
             provider: "codex-cli".to_string(),
             model: None,
             reasoning_effort: None,
-            provider_session_id: None,
+            provider_session_id: provider_session_id.map(ToString::to_string),
             payload: json!({
                 "askMode": ask_mode,
                 "document": {
@@ -2993,6 +3061,10 @@ mod tests {
             bridge_dir: "bridge".to_string(),
             file_path: "bridge/outbox/task-test.json".to_string(),
         }
+    }
+
+    fn bridge_task_with_ask_mode(ask_mode: &str) -> BridgeTask {
+        bridge_task_with_ask_mode_and_session(ask_mode, None)
     }
 
     #[test]
@@ -3037,9 +3109,27 @@ mod tests {
             Path::new("C:/workspace/response.md"),
             None,
             false,
+            false,
         );
         assert!(!args.iter().any(|arg| arg == "--add-dir"));
         assert!(args.iter().any(|arg| arg == "read-only"));
+    }
+
+    #[test]
+    fn deep_codex_stage_resumes_existing_chat_session() {
+        let session_id = "123e4567-e89b-12d3-a456-426614174000";
+        let task = bridge_task_with_ask_mode_and_session("deep", Some(session_id));
+        let args = codex_args(
+            &task,
+            Path::new("C:/workspace"),
+            Path::new("C:/workspace/response.md"),
+            None,
+            true,
+            true,
+        );
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["resume", session_id, "-"]));
     }
 }
 

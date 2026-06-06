@@ -114,7 +114,7 @@ Fast mode uses a PaperQA2 sparse adapter when PaperQA2 is installed, with a
 compatible local sparse scorer as a fallback. It uses text already extracted by
 the reader; it does not run Marker, OCR, or PDF-to-Markdown prewarming. If Fast
 evidence is insufficient, Paper Pilot shows the Fast answer and automatically
-queues a Deep Read follow-up below it.
+queues a Deep follow-up below it.
 
 ## 🤖 Agent Bridge
 

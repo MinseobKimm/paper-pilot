@@ -111,12 +111,16 @@ function ChatThread(props: {
         const question = stripChatAskPrefix(result.inputText);
         const modeKind = chatAskModeKind(result.inputText);
         const modeLabel = chatAskModeLabel(result.inputText);
+        const pendingAnswer =
+          modeKind === "auto"
+            ? "질문을 분석하는 중입니다"
+            : modeKind === "fast"
+              ? "Fast가 관련 페이지 근거를 찾는 중입니다"
+              : modeKind === "deep"
+                ? "Deep이 원본 PDF를 확인하는 중입니다"
+                : ui.aiPendingAnswer.replace(/[.。]+$/, "");
         const answer =
-          isPending && modeKind === "deep"
-            ? "Deep Read가 원본 PDF를 확인하는 중입니다."
-            : isPending
-              ? ui.aiPendingAnswer
-              : getReadableAiOutput(result, ui);
+          isPending ? pendingAnswer : getReadableAiOutput(result, ui);
         const tokenEstimate = resultTokenEstimateText(result);
         return (
           <article key={result.id} className="chat-turn">
@@ -137,7 +141,11 @@ function ChatThread(props: {
                   </button>
                 )}
               </div>
-              <FormattedAiText text={answer} onPageCitation={props.onGoToPage} />
+              {isPending ? (
+                <p className="chat-pending-status">{answer}<span aria-hidden="true" /></p>
+              ) : (
+                <FormattedAiText text={answer} onPageCitation={props.onGoToPage} />
+              )}
             </div>
           </article>
         );

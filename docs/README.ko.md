@@ -109,7 +109,7 @@ Paper Pilot의 논문 채팅은 세 가지 모드로 동작합니다.
 - `Fast`: 영어 retrieval query로 lazy sparse page-text evidence를 찾고, 그 근거만 사용해 페이지 인용과 함께 답합니다.
 - `Deep`: agent가 원본 PDF 파일 경로와 compact document context pack을 받고 PDF를 직접 읽습니다.
 
-Fast 모드는 PaperQA2가 설치되어 있으면 PaperQA2 sparse adapter를 사용하고, 없으면 compatible local sparse scorer로 fallback합니다. Reader가 이미 추출해 둔 page text만 사용하며 Marker, OCR, PDF-to-Markdown prewarm은 실행하지 않습니다. Fast 근거가 부족하면 Fast 답변을 먼저 보여준 뒤, 아래에 Deep Read follow-up을 자동으로 큐에 넣습니다.
+Fast 모드는 PaperQA2가 설치되어 있으면 PaperQA2 sparse adapter를 사용하고, 없으면 compatible local sparse scorer로 fallback합니다. Reader가 이미 추출해 둔 page text만 사용하며 Marker, OCR, PDF-to-Markdown prewarm은 실행하지 않습니다. Fast 근거가 부족하면 Fast 답변을 먼저 보여준 뒤, 아래에 Deep follow-up을 자동으로 큐에 넣습니다.
 
 ## 🤖 Agent Bridge
 

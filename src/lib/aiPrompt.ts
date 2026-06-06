@@ -56,7 +56,7 @@ export function inputTextFor(payload: Record<string, unknown>): string {
       return `[Auto Answer]\n${displayQuestion}`;
     }
     if (payload.askMode === "deep") {
-      return `[Deep Read]\n${displayQuestion}`;
+      return `[Deep]\n${displayQuestion}`;
     }
     if (payload.askMode === "direct") {
       return `[PDF direct]\n${displayQuestion}`;

@@ -5,7 +5,7 @@ import { saveAiResult, readBridgeResult, startBridgeWorker, upsertAnnotation } f
 import { normalizeComparable } from "../lib/textUtils";
 import { annotationKey } from "../lib/annotationHelpers";
 import { colorForHighlightTag, parseAutoHighlightCandidates } from "../lib/autoHighlights";
-import { wordMeaningTaskType } from "../lib/aiResults";
+import { chatInputTextWithMode, wordMeaningTaskType } from "../lib/aiResults";
 import { isStalePendingTranslation, translationInputLanguage, translationInputText, translationRequestKey } from "../lib/translations";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
 import { estimateTokens, parseTokenEstimate, prependTokenEstimate } from "../lib/tokenEstimate";
@@ -29,6 +29,13 @@ type BridgeResultsInput = {
   saveDocumentLayoutFromResult: (result: AiResultRecord) => Promise<void>;
   onFastEvidenceInsufficient?: (result: AiResultRecord, metadata: Record<string, unknown>) => Promise<void>;
 };
+
+function savedChatAskMode(taskType: string, value: unknown) {
+  if (taskType !== "chatWithPaper") {
+    return "";
+  }
+  return value === "fast" || value === "deep" || value === "auto" ? value : "";
+}
 
 export function useBridgeResults(input: BridgeResultsInput) {
   const {
@@ -135,8 +142,12 @@ export function useBridgeResults(input: BridgeResultsInput) {
               : item.providerSessionId;
         const outputText = bridgeResult.output || JSON.stringify(bridgeResult.payload, null, 2);
         const pendingEstimate = parseTokenEstimate(item.outputText);
+        const plannedAskMode =
+          savedChatAskMode(item.taskType.toString(), nestedPayload.askMode) ||
+          savedChatAskMode(item.taskType.toString(), metadata.askMode);
         const savedResult = await saveLocalAiResult({
           ...item,
+          inputText: plannedAskMode ? chatInputTextWithMode(item.inputText, plannedAskMode) : item.inputText,
           outputText: prependTokenEstimate(outputText, {
             inputTokens: pendingEstimate.inputTokens,
             outputTokens: estimateTokens(outputText),

@@ -79,6 +79,7 @@ import {
 } from "./lib/wordMeanings";
 import { inferYear, initialState, wordMeaningLookupEnabled } from "./lib/appState";
 import {
+  chatInputTextWithMode,
   getReadableAiOutput,
   latestProviderSessionId,
   stripChatAskPrefix,
@@ -546,8 +547,35 @@ function App() {
       }
       return null;
     }
+    const providerKind = normalizeAiProviderKind(state.settings.aiProvider);
+    const optimisticChatId =
+      taskType === "chatWithPaper" && typeof payload.question === "string" ? makeId("chat-pending") : "";
+    if (optimisticChatId) {
+      const requestedAskMode = typeof payload.askMode === "string" ? payload.askMode : "auto";
+      const askMode = requestedAskMode === "direct" ? "deep" : requestedAskMode;
+      const question = typeof payload.question === "string" ? payload.question.trim() : "";
+      patchState((draft) => {
+        draft.aiResults = [
+          {
+            id: optimisticChatId,
+            documentId: activeDocument.id,
+            taskType,
+            inputText: chatInputTextWithMode(question, askMode),
+            outputText: "",
+            status: "pending",
+            createdAt: nowIso(),
+            provider: providerKind,
+            model: selectedAiModelForRun(state.settings),
+          },
+          ...draft.aiResults.filter((item) => item.id !== optimisticChatId),
+        ];
+      });
+      setAssistantMode("study");
+      if (!options.keepPanel) {
+        setActivePanel("ai");
+      }
+    }
     try {
-      const providerKind = normalizeAiProviderKind(state.settings.aiProvider);
       const needsPages =
         ["summarizePaper", "chatWithPaper", "autoHighlight", "outlineDocument", "classifyDocumentLayout", wordMeaningTaskType].includes(taskType) ||
         (taskType === "translatePage" && !payload.text);
@@ -575,9 +603,11 @@ function App() {
       }
       const explicitProviderSessionId =
         typeof taskPayload.providerSessionId === "string" ? taskPayload.providerSessionId : "";
-      const providerSessionId = taskType === "chatWithPaper"
-        ? explicitProviderSessionId
-        : explicitProviderSessionId || latestProviderSessionId(activeAiResults, providerKind);
+      const reusableSessionResults =
+        taskType === "chatWithPaper"
+          ? activeAiResults.filter((result) => result.taskType.toString() === "chatWithPaper")
+          : activeAiResults;
+      const providerSessionId = explicitProviderSessionId || latestProviderSessionId(reusableSessionResults, providerKind);
       const queued = await runAiTask(providerKind, bridgePath, taskType, activeDocument, {
         ...taskPayload,
         customPrompt: state.settings.customPrompt,
@@ -587,7 +617,7 @@ function App() {
         providerSessionId,
       });
       patchState((draft) => {
-        draft.aiResults = [queued, ...draft.aiResults.filter((item) => item.id !== queued.id)];
+        draft.aiResults = [queued, ...draft.aiResults.filter((item) => item.id !== queued.id && item.id !== optimisticChatId)];
       });
       setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
       if (taskType === "explainText" || taskType === "explainRegionImage") {
@@ -620,6 +650,19 @@ function App() {
       }
       return queued;
     } catch (error) {
+      if (optimisticChatId) {
+        patchState((draft) => {
+          draft.aiResults = draft.aiResults.map((item) =>
+            item.id === optimisticChatId
+              ? {
+                  ...item,
+                  outputText: String(error),
+                  status: "failed",
+                }
+              : item,
+          );
+        });
+      }
       if (!options.silent) {
         showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error");
       }

@@ -15,7 +15,7 @@ export type AiDisplaySection = {
 
 export const wordMeaningTaskType: AiTaskType = "defineWordMeanings";
 export const rightPanelHiddenTasks = new Set(["translatePage", wordMeaningTaskType, "classifyDocumentLayout"]);
-const chatAskPrefixPattern = /^\[(PDF direct|Fast Answer|Auto Answer|Deep Read)\]\s*/i;
+const chatAskPrefixPattern = /^\[(PDF direct|Fast Answer|Auto Answer|Deep Read|Deep)\]\s*/i;
 
 export type ChatAskModeKind = "plain" | "auto" | "fast" | "deep";
 
@@ -65,6 +65,20 @@ export function stripChatAskPrefix(inputText: string) {
   return inputText.replace(chatAskPrefixPattern, "").trim();
 }
 
+export function chatInputTextWithMode(inputText: string, askMode: string | null | undefined) {
+  const question = stripChatAskPrefix(inputText);
+  if (askMode === "fast") {
+    return `[Fast Answer]\n${question}`;
+  }
+  if (askMode === "deep") {
+    return `[Deep]\n${question}`;
+  }
+  if (askMode === "auto") {
+    return `[Auto Answer]\n${question}`;
+  }
+  return inputText;
+}
+
 export function chatAskModeKind(inputText: string): ChatAskModeKind {
   const tag = inputText.match(chatAskPrefixPattern)?.[1]?.toLowerCase() ?? "";
   if (tag === "auto answer") {
@@ -73,7 +87,7 @@ export function chatAskModeKind(inputText: string): ChatAskModeKind {
   if (tag === "fast answer") {
     return "fast";
   }
-  if (tag === "deep read" || tag === "pdf direct") {
+  if (tag === "deep" || tag === "deep read" || tag === "pdf direct") {
     return "deep";
   }
   return "plain";
@@ -88,7 +102,7 @@ export function chatAskModeLabel(inputText: string) {
     return "Fast";
   }
   if (kind === "deep") {
-    return "Deep Read";
+    return "Deep";
   }
   return "";
 }

@@ -4321,6 +4321,30 @@ select:disabled {
   overflow-wrap: anywhere;
 }
 
+.chat-pending-status span::after {
+  display: inline-block;
+  width: 18px;
+  text-align: left;
+  content: "";
+  animation: pending-dots 1.2s steps(1, end) infinite;
+}
+
+@keyframes pending-dots {
+  0%,
+  100% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75% {
+    content: "...";
+  }
+}
+
 .chat-bubble.user {
   justify-self: end;
   background: #e7f2ee;
