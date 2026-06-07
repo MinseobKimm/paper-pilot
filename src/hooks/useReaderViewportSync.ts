@@ -1,7 +1,13 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { outlineAnchorDomId, type OutlineAnchor, type OutlineRow } from "../lib/outlines";
-import { clampNumber, documentHorizontalScrollSettingKey, nextPageTranslationReadProgress, type ReaderBookmark } from "../lib/readerSettings";
+import {
+  clampNumber,
+  documentHorizontalScrollSettingKey,
+  documentLastReaderViewportSettingKey,
+  nextPageTranslationReadProgress,
+  type ReaderBookmark,
+} from "../lib/readerSettings";
 import { setSetting } from "../lib/tauri";
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import type { AppStateRecord, DocumentRecord, PageRecord, WorkspaceMode } from "../types";
@@ -21,8 +27,10 @@ type ReaderViewportSyncInput = {
   rightPanelOpen: boolean;
   readerLayout: unknown;
   savedHorizontalScrollLeft: number;
+  lastReaderViewport: ReaderBookmark | null;
   activeOutlineRows: OutlineRow[];
   patchState: PatchState;
+  commitZoom: (zoom: number) => void;
   setPageCursor: Dispatch<SetStateAction<number>>;
   setActiveOutlineId: Dispatch<SetStateAction<string | null>>;
   setPageOutlineAnchors: Dispatch<SetStateAction<Record<number, OutlineAnchor[]>>>;
@@ -44,8 +52,10 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
     rightPanelOpen,
     readerLayout,
     savedHorizontalScrollLeft,
+    lastReaderViewport,
     activeOutlineRows,
     patchState,
+    commitZoom,
     setPageCursor,
     setActiveOutlineId,
     setPageOutlineAnchors,
@@ -54,6 +64,11 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
   } = input;
 
   const scrollSaveTimerRef = useRef<number | null>(null);
+  const lastViewportSaveTimerRef = useRef<number | null>(null);
+  const pendingLastViewportRef = useRef<ReaderBookmark | null>(null);
+  const savedLastViewportRef = useRef<ReaderBookmark | null>(lastReaderViewport);
+  const restoredLastViewportDocumentRef = useRef<string | null>(null);
+  const lastViewportSavePausedUntilRef = useRef(0);
   const readerScrollSyncFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -81,10 +96,77 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
     readerRef,
   ]);
 
+  useEffect(() => {
+    savedLastViewportRef.current = lastReaderViewport;
+  }, [lastReaderViewport]);
+
+  useEffect(() => {
+    restoredLastViewportDocumentRef.current = null;
+  }, [activeDocumentId, pdfDocument]);
+
+  useEffect(() => {
+    if (mode !== "reader") {
+      restoredLastViewportDocumentRef.current = null;
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    const documentId = activeDocumentId;
+    return () => {
+      if (documentId) {
+        flushLastReaderViewportSave();
+      }
+    };
+  }, [activeDocumentId, mode, pdfDocument]);
+
+  useEffect(() => {
+    if (mode !== "reader" || !activeDocumentId || !pdfDocument) {
+      return;
+    }
+    const flush = () => flushLastReaderViewportSave();
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") {
+        flush();
+      }
+    };
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  }, [activeDocumentId, mode, pdfDocument]);
+
+  useEffect(() => {
+    if (!activeDocumentId || !pdfDocument || mode !== "reader" || !lastReaderViewport) {
+      return;
+    }
+    if (restoredLastViewportDocumentRef.current === activeDocumentId) {
+      return;
+    }
+    const maxPage = Math.max(1, pdfDocument.numPages ?? activeDocument?.pageCount ?? activePages.length ?? 1);
+    const bookmark = {
+      ...lastReaderViewport,
+      page: Math.round(clampNumber(lastReaderViewport.page, 1, maxPage)),
+    };
+    lastViewportSavePausedUntilRef.current = performance.now() + 1200;
+    if (Math.abs(zoom - bookmark.zoom) >= 0.001) {
+      commitZoom(bookmark.zoom);
+      return;
+    }
+    restoredLastViewportDocumentRef.current = activeDocumentId;
+    restoreReaderBookmark(bookmark);
+  }, [activeDocumentId, activeDocument?.pageCount, activePages.length, commitZoom, lastReaderViewport, mode, pdfDocument, zoom]);
+
   useEffect(
     () => () => {
       if (scrollSaveTimerRef.current !== null) {
         window.clearTimeout(scrollSaveTimerRef.current);
+      }
+      if (lastViewportSaveTimerRef.current !== null) {
+        window.clearTimeout(lastViewportSaveTimerRef.current);
       }
       if (readerScrollSyncFrameRef.current !== null) {
         window.cancelAnimationFrame(readerScrollSyncFrameRef.current);
@@ -100,6 +182,107 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
     }
     scheduleReaderCursorSync(element);
   }, [mode, activeDocumentId, activeOutlineRows, zoom]);
+
+  function viewportMatches(left: ReaderBookmark | null, right: ReaderBookmark | null) {
+    if (!left || !right) {
+      return false;
+    }
+    return (
+      left.documentId === right.documentId &&
+      left.page === right.page &&
+      Math.abs(left.zoom - right.zoom) < 0.001 &&
+      Math.abs(left.scrollTop - right.scrollTop) < 2 &&
+      Math.abs(left.scrollLeft - right.scrollLeft) < 2 &&
+      Math.abs(left.scrollRatio - right.scrollRatio) < 0.002
+    );
+  }
+
+  function pageAtReaderMarker(element: HTMLElement) {
+    const pageShells = Array.from(element.querySelectorAll<HTMLElement>(".pdf-page-shell"));
+    if (pageShells.length === 0) {
+      return null;
+    }
+    const markerTop = element.scrollTop + 72;
+    let nextPage = Number(pageShells[0].dataset.page ?? 1) || 1;
+    for (const shell of pageShells) {
+      const page = Number(shell.dataset.page ?? 0);
+      if (page > 0 && shell.offsetTop <= markerTop) {
+        nextPage = page;
+      } else {
+        break;
+      }
+    }
+    return nextPage;
+  }
+
+  function captureLastReaderViewport(element: HTMLElement): ReaderBookmark | null {
+    if (!activeDocumentId || mode !== "reader" || !pdfDocument) {
+      return null;
+    }
+    const page = pageAtReaderMarker(element);
+    if (!page) {
+      return null;
+    }
+    const maxPage = Math.max(1, pdfDocument.numPages ?? activeDocument?.pageCount ?? activePages.length ?? 1);
+    const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    return {
+      id: "reader-last-viewport",
+      documentId: activeDocumentId,
+      page: Math.round(clampNumber(page, 1, maxPage)),
+      zoom,
+      scrollTop: Math.max(0, Math.round(element.scrollTop)),
+      scrollLeft: Math.max(0, Math.round(element.scrollLeft)),
+      scrollRatio: maxTop > 0 ? clampNumber(element.scrollTop / maxTop, 0, 1) : 0,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  function persistLastReaderViewport(viewport: ReaderBookmark) {
+    if (viewportMatches(viewport, savedLastViewportRef.current)) {
+      return;
+    }
+    const key = documentLastReaderViewportSettingKey(viewport.documentId);
+    const value = JSON.stringify(viewport);
+    savedLastViewportRef.current = viewport;
+    patchState((draft) => {
+      draft.settings[key] = value;
+    });
+    void setSetting(key, value);
+  }
+
+  function flushLastReaderViewportSave() {
+    if (lastViewportSaveTimerRef.current !== null) {
+      window.clearTimeout(lastViewportSaveTimerRef.current);
+      lastViewportSaveTimerRef.current = null;
+    }
+    const pending = pendingLastViewportRef.current;
+    pendingLastViewportRef.current = null;
+    if (pending) {
+      persistLastReaderViewport(pending);
+    }
+  }
+
+  function scheduleLastReaderViewportSave(element: HTMLElement) {
+    if (performance.now() < lastViewportSavePausedUntilRef.current) {
+      return;
+    }
+    const viewport = captureLastReaderViewport(element);
+    if (!viewport || viewportMatches(viewport, savedLastViewportRef.current) || viewportMatches(viewport, pendingLastViewportRef.current)) {
+      return;
+    }
+    pendingLastViewportRef.current = viewport;
+    if (lastViewportSaveTimerRef.current !== null) {
+      window.clearTimeout(lastViewportSaveTimerRef.current);
+    }
+    lastViewportSaveTimerRef.current = window.setTimeout(() => {
+      lastViewportSaveTimerRef.current = null;
+      const pending = pendingLastViewportRef.current;
+      pendingLastViewportRef.current = null;
+      if (pending) {
+        persistLastReaderViewport(pending);
+      }
+    }, 320);
+  }
 
   function scheduleHorizontalScrollSave(scrollLeft: number) {
     if (!activeDocumentId) {
@@ -233,6 +416,7 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
   }
 
   function scheduleReaderCursorSync(element: HTMLElement) {
+    scheduleLastReaderViewportSave(element);
     if (readerScrollSyncFrameRef.current !== null) {
       window.cancelAnimationFrame(readerScrollSyncFrameRef.current);
     }

@@ -6,6 +6,7 @@ const pageTextLayoutSettingPrefix = "pageTextLayout:";
 const pageTextLayoutConfidenceSettingPrefix = "pageTextLayoutConfidence:";
 const pageTextLayoutSourceSettingPrefix = "pageTextLayoutSource:";
 const readerBookmarksSettingPrefix = "readerBookmarks:";
+const readerLastViewportSettingPrefix = "readerLastViewport:";
 export const pageTextLayoutAiVersion = "page-text-layout-v1";
 
 export const defaultReaderZoom = 1.05;
@@ -57,6 +58,10 @@ export function documentReaderBookmarksSettingKey(documentId: string) {
   return `${readerBookmarksSettingPrefix}${documentId}`;
 }
 
+export function documentLastReaderViewportSettingKey(documentId: string) {
+  return `${readerLastViewportSettingPrefix}${documentId}`;
+}
+
 function normalizeReaderBookmark(value: unknown, documentId: string): ReaderBookmark | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -103,6 +108,21 @@ export function readerBookmarksFromSettings(settings: Record<string, string>, do
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   } catch {
     return [];
+  }
+}
+
+export function lastReaderViewportFromSettings(settings: Record<string, string>, documentId: string | null) {
+  if (!documentId) {
+    return null;
+  }
+  const raw = settings[documentLastReaderViewportSettingKey(documentId)];
+  if (!raw) {
+    return null;
+  }
+  try {
+    return normalizeReaderBookmark(JSON.parse(raw), documentId);
+  } catch {
+    return null;
   }
 }
 

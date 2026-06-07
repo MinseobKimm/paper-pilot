@@ -36,6 +36,7 @@ import {
   clampNumber,
   defaultReaderZoom,
   documentReaderBookmarksSettingKey,
+  lastReaderViewportFromSettings,
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
   pageTextLayoutSourceSettingKey,
@@ -284,6 +285,10 @@ function App() {
     () => readerBookmarksFromSettings(state.settings, activeDocumentId),
     [activeDocumentId, state.settings],
   );
+  const activeLastReaderViewport = useMemo(
+    () => lastReaderViewportFromSettings(state.settings, activeDocumentId),
+    [activeDocumentId, state.settings],
+  );
   const activePdfDocument = activeDocumentId && activeDocumentId === loadedDocumentId ? pdfDocument : null;
 
   useEffect(() => {
@@ -375,14 +380,16 @@ function App() {
   }
 
   async function loadPdfBytes(document: DocumentRecord, bytes?: Uint8Array) {
+    const lastViewport = lastReaderViewportFromSettings(state.settings, document.id);
+    const initialPage = lastViewport?.page ?? 1;
     setMode("reader");
     if (!bytes && activeDocumentId === document.id && loadedDocumentId === document.id && pdfDocument) {
-      setPageCursor(1);
+      setPageCursor(initialPage);
       return;
     }
     setIsBusy(true);
     setActiveDocumentId(document.id);
-    setPageCursor(1);
+    setPageCursor(initialPage);
     try {
       const pdfBytes = bytes ?? (await readDocumentBytes(document.id));
       setLoadedBytes(pdfBytes);
@@ -750,8 +757,10 @@ function App() {
     rightPanelOpen,
     readerLayout,
     savedHorizontalScrollLeft,
+    lastReaderViewport: activeLastReaderViewport,
     activeOutlineRows,
     patchState,
+    commitZoom,
     setPageCursor,
     setActiveOutlineId,
     setPageOutlineAnchors,
