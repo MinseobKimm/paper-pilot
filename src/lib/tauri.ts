@@ -16,6 +16,7 @@ import type {
   RecommendationRunRecord,
   ResetWorkspaceResult,
 } from "../types";
+import { deleteDocumentScopedSettings } from "./documentSettings";
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 type TauriWindow = Window &
@@ -213,6 +214,7 @@ export async function deleteDocument(documentId: string): Promise<void> {
   state.notes = state.notes.filter((item) => item.documentId !== documentId);
   state.aiResults = state.aiResults.filter((item) => item.documentId !== documentId);
   state.citationCards = state.citationCards.filter((item) => item.documentId !== documentId);
+  deleteDocumentScopedSettings(state.settings, [documentId]);
   saveBrowserState(state);
   sessionStorage.removeItem(`paperdock-pdf-${documentId}`);
 }

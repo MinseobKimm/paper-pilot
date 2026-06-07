@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppStateRecord, DocumentRecord, FolderRecord, WorkspaceMode } from "../types";
+import { deleteDocumentScopedSettings } from "../lib/documentSettings";
 import { documentFolderId, folderDescendantIds, folderPathLabel } from "../lib/libraryTree";
 import { makeId, nowIso } from "../lib/ids";
 import { deleteDocument, deleteFolders, updateDocument, upsertFolder } from "../lib/tauri";
@@ -172,6 +173,7 @@ export function useLibraryController(input: LibraryControllerInput) {
       draft.notes = draft.notes.filter((item) => !ids.has(item.documentId));
       draft.aiResults = draft.aiResults.filter((item) => !ids.has(item.documentId));
       draft.citationCards = draft.citationCards.filter((item) => !ids.has(item.documentId));
+      deleteDocumentScopedSettings(draft.settings, ids);
     });
     if (input.activeDocumentId && ids.has(input.activeDocumentId)) {
       input.setActiveDocumentId(null);

@@ -958,6 +958,115 @@ fn update_document(app: AppHandle, document: DocumentRecord) -> AppResult<Docume
     Ok(updated)
 }
 
+fn escape_sql_like(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn prune_document_word_meanings(
+    tx: &rusqlite::Transaction<'_>,
+    document_id: &str,
+) -> AppResult<()> {
+    let raw: Option<String> = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'wordMeaningMapJson'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let mut parsed: Value = match serde_json::from_str(&raw) {
+        Ok(Value::Object(map)) => Value::Object(map),
+        _ => return Ok(()),
+    };
+    let Some(map) = parsed.as_object_mut() else {
+        return Ok(());
+    };
+
+    let mut changed = false;
+    let mut empty_keys = Vec::new();
+    for (key, value) in map.iter_mut() {
+        let Some(entries) = value.as_array_mut() else {
+            continue;
+        };
+        let before = entries.len();
+        entries.retain(|entry| {
+            entry
+                .get("documentId")
+                .and_then(Value::as_str)
+                .map(|entry_document_id| entry_document_id != document_id)
+                .unwrap_or(true)
+        });
+        if entries.len() != before {
+            changed = true;
+        }
+        if entries.is_empty() {
+            empty_keys.push(key.clone());
+        }
+    }
+    for key in empty_keys {
+        map.remove(&key);
+    }
+    if changed {
+        let value = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('wordMeaningMapJson', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![value],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn delete_document_scoped_settings(
+    tx: &rusqlite::Transaction<'_>,
+    document_id: &str,
+) -> AppResult<()> {
+    prune_document_word_meanings(tx, document_id)?;
+
+    for key in [
+        format!("documentZoom:{document_id}"),
+        format!("documentScrollLeft:{document_id}"),
+        format!("readerBookmarks:{document_id}"),
+        format!("readerLastViewport:{document_id}"),
+        format!("pageTextLayoutAiVersion:{document_id}"),
+        format!("documentOutlineVersion:{document_id}"),
+        format!("readingStatus:{document_id}"),
+        format!("documentWordList:{document_id}"),
+    ] {
+        tx.execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(|error| error.to_string())?;
+    }
+
+    let escaped_document_id = escape_sql_like(document_id);
+    for prefix in [
+        "pageTextLayout:",
+        "pageTextLayoutConfidence:",
+        "pageTextLayoutSource:",
+    ] {
+        let pattern = format!("{prefix}{escaped_document_id}:%");
+        tx.execute(
+            "DELETE FROM settings WHERE key LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn delete_document(app: AppHandle, document_id: String) -> AppResult<()> {
     let mut conn = open_db(&app)?;
@@ -981,10 +1090,11 @@ fn delete_document(app: AppHandle, document_id: String) -> AppResult<()> {
     ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE document_id = ?1"),
-            params![document_id],
+            params![&document_id],
         )
         .map_err(|error| error.to_string())?;
     }
+    delete_document_scoped_settings(&tx, &document_id)?;
     tx.execute("DELETE FROM documents WHERE id = ?1", params![&document_id])
         .map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
