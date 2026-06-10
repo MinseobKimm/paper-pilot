@@ -1,1 +1,2 @@
-paper-qa
+# PaperQA2. Upstream identifies PaperQA2 as paper-qa version 5 and newer.
+paper-qa>=5

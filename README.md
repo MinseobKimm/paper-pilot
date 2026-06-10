@@ -2,7 +2,7 @@
 
 Your papers. Your questions. Your margins. Your agent.
 
-A local-first desktop reader that turns academic PDFs into a persistent research workspace. Every explanation, highlight, note, translation, and citation card stays attached to the paper that created it.
+Paper Pilot is a local-first desktop reader for academic PDFs. It keeps the original paper, page-aware reading state, translations, highlights, notes, citation cards, and AI answers in one persistent workspace.
 
 ![Tauri](https://img.shields.io/badge/Tauri-2-333333?style=flat-square&labelColor=000000)
 ![React](https://img.shields.io/badge/React-18-333333?style=flat-square&labelColor=000000)
@@ -10,194 +10,112 @@ A local-first desktop reader that turns academic PDFs into a persistent research
 ![Rust](https://img.shields.io/badge/Rust-backend-333333?style=flat-square&labelColor=000000)
 ![PDF.js](https://img.shields.io/badge/PDF.js-reader-333333?style=flat-square&labelColor=000000)
 ![SQLite](https://img.shields.io/badge/SQLite-local-333333?style=flat-square&labelColor=000000)
-![AI Agent](https://img.shields.io/badge/AI-agent_bridge-333333?style=flat-square&labelColor=000000)
 
-[한국어 README](docs/README.ko.md)
+[Korean README](docs/README.ko.md)
 
-## 📸 See Paper Pilot In Action
+## What It Does
 
-### 📚 Library workspace
-
-![Paper Pilot library workspace](docs/images/paper-pilot-library.png)
-
-The library turns a folder of PDFs into a clean reading queue. Add papers into the selected folder, create nested folders like `Math`, search by title, author, year, or abstract, and manage each paper as a compact card with selection and bookmark controls. It is designed to move from collection management to reading without opening a separate citation manager first.
-
-### 🖼️ Visual explanation for figures and equations
-
-![Paper Pilot visual explanation](docs/images/paper-pilot-image-explain.png)
-
-Image explanation handles figures, equations, tables, and cropped page regions. In the screenshot, Paper Pilot recognizes the scaled dot-product attention formula from the PDF crop, keeps the notation readable, explains each term in Korean, and connects the equation back to the paper context.
-
-### 🧠 Reader workspace and AI panel
-
-![Paper Pilot reader workspace](docs/images/paper-pilot-reader.png)
-
-The reader keeps the paper, outline, annotation tools, and AI chat in one workspace. In the screenshot, the Attention paper is open at Figure 2, the left pane shows the detected outline, the center page keeps the original PDF and highlight state, and the right AI panel answers a Korean question with page-grounded references.
-
-> Privacy note. Paper Pilot is built around local files and local state. AI providers only receive the context needed for the task you run, such as selected text, page excerpts, or an image crop. For unpublished papers, choose your agent provider deliberately.
-
-Paper readers usually stop at rendering pages. AI chat usually forgets where the answer came from. Paper Pilot joins the two: the PDF remains the source of truth, while agent outputs become part of the paper's long-lived study record.
-
-* * *
-
-## ✨ Feature Highlights
-
-- Word meanings and technical terms: Paper Pilot can extract important English terms from the current paper, build Korean meanings with dictionary and agent support, and show a lightweight popup when you click a term.
-- Page-aware text selection: each page can be treated as single-column or two-column, so single-column papers keep native browser selection while multi-column papers use a custom reading-order selection path.
-- Automatic paper naming: when a PDF is opened for the first time, the library tries to use the real paper title instead of the file name. You can still edit the title, author, year, abstract, folder, and bookmark state later.
-- Faster return to a paper: extracted page text, outline data, layout decisions, translations, word lists, zoom, and reading position are saved locally so reopening a known paper does less repeated work.
-- Outline, search, and link previews: the reader combines PDF/AI outline navigation, page search hits, citation/link previews, and page jump controls without leaving the document.
-- Translation beside the original: sentence-level page translation stays attached to the original page, with language and provider settings managed from the app.
-
-## 🌐 Language Support
-
-- UI languages: English and Korean.
-- Translation language: Korean only for now.
-
-## 🧠 What Paper Pilot Means
-
-Paper Pilot is not a generic document viewer with an AI button. It is a paper-reading workflow shaped around how research actually happens:
+Most PDF readers show pages. Most chat tools answer questions away from the paper. Paper Pilot joins the two: the PDF remains the source of truth, and every useful result can return to the paper as a saved study record.
 
 ```text
 Import papers -> Read in context -> Ask an agent -> Save the result -> Export when needed
 ```
 
-The core idea is simple: a question about a paper should not disappear into a chat transcript. It should return to the paper as an explanation, highlight, note, citation reason, translation, or exportable artifact.
+## Product Tour
 
-## ⚡ What Regular PDF Readers Can't Do
+### Library
 
-Most research tools split the work across too many places.
+![Paper Pilot library workspace](docs/images/paper-pilot-library.png)
 
-- PDF readers show the page but do not understand your question.
-- Chat apps answer questions but lose the exact paper context.
-- Citation managers store references but not why a reference matters.
-- Translation tools translate text but detach it from the original page.
-- Notes apps preserve thoughts but require manual linking back to the PDF.
-- Many AI-first readers depend on direct model APIs, which can add separate usage costs, API key setup, and billing management before the reading workflow even starts.
+Turn a folder of PDFs into a searchable reading queue. Add papers, create folders, bookmark important work, and edit title, authors, year, abstract, and folder metadata without leaving the app.
 
-Paper Pilot keeps those pieces together.
+### Reader
 
-| Axis | Paper Pilot | Typical PDF + Chat Workflow |
-| --- | --- | --- |
-| Paper context | Page-aware, selection-aware, document-aware | Manually copied into chat |
-| AI outputs | Saved beside the paper | Buried in a separate conversation |
-| Highlights | Manual and agent-assisted | Manual only |
-| Translation | Page sidecar attached to PDF | Detached text output |
-| Citations | Reference cards with reasons and export | Separate manager, often no rationale |
-| Storage | Local SQLite + local files | Split across apps |
-| AI cost model | Works through selectable agent providers and local draft mode | Often requires a separate model API key and usage-based billing |
-| Export | JSON/ZIP study bundle | Manual copy-paste |
+![Paper Pilot reader workspace](docs/images/paper-pilot-reader.png)
 
-## 🧭 The Reading Cycle
+Read the original PDF with outline navigation, page search, zoom, highlights, link previews, selection tools, and a persistent AI panel. Extracted page text, layout decisions, translations, word lists, zoom, and reading position are stored locally for faster return visits.
 
-Paper Pilot keeps the reading loop short and visible:
+### Visual Explanation
 
-| Step | Action | Saved output |
-| --- | --- | --- |
-| 1. Collect | Add PDFs and organize them into folders. | Library record |
-| 2. Read | Use outline, zoom, search, translation, and highlights beside the PDF. | Page-aware reading state |
-| 3. Ask | Send selected text, page context, or an image crop to an agent. | Explanation, summary, or answer |
-| 4. Keep | Save useful results as highlights, notes, citation cards, or export bundles. | Persistent paper memory |
+![Paper Pilot visual explanation](docs/images/paper-pilot-image-explain.png)
+
+Ask about a selected page region, figure, table, or equation. Paper Pilot sends only the task context needed by the selected agent and saves the answer back to the paper.
+
+## Core Features
+
+- Local-first paper workspace with SQLite state and local files.
+- Page-aware text selection for single-column and two-column papers.
+- Sentence-level Korean translation beside the original PDF page.
+- Korean word meanings and technical-term popups built from paper context.
+- AI explanations for selected text, page regions, figures, equations, and paper-level questions.
+- Citation cards with reference extraction, link enrichment, rationale notes, and BibTeX/CSV export.
+- Study export as local JSON/ZIP bundles.
 
 ## Ask AI Paper Q&A
 
 Paper Pilot offers three paper chat modes:
 
-- `Auto`: the selected Codex CLI or Claude Code agent translates the question to
-  English and chooses Fast or Deep.
-- `Fast`: the agent uses English retrieval queries against lazily cached sparse
-  page-text evidence, then answers only from that evidence with page citations.
-- `Deep`: the agent receives the original PDF file path plus a compact document
-  context pack and reads the PDF directly.
+| Mode | Best for | How it works |
+| --- | --- | --- |
+| `Auto` | Letting the selected agent choose the path | The agent rewrites the question in English and chooses Fast or Deep. |
+| `Fast` | Quick, text-grounded questions | Uses PaperQA2-powered evidence search over Reader-indexed page text, then answers from retrieved evidence with page citations. |
+| `Deep` | Equations, figures, tables, algorithms, layout-sensitive details, and complex cross-page reasoning | Gives the selected agent the original PDF path plus a compact document context pack for a full-paper pass. |
 
-Fast mode uses a PaperQA2 sparse adapter when PaperQA2 is installed, with a
-compatible local sparse scorer as a fallback. It uses text already extracted by
-the reader; it does not run Marker, OCR, or PDF-to-Markdown prewarming. If Fast
-evidence is insufficient, Paper Pilot shows the Fast answer and automatically
-queues a Deep follow-up below it.
+Fast mode is powered by [PaperQA2](https://github.com/Future-House/paper-qa), installed through the Python package `paper-qa>=5` in `requirements.txt`. It keeps answers tied to the page text that Paper Pilot has already indexed. When Fast evidence is thin, the answer is marked as evidence-limited and the reader can continue with Deep for a more complete pass.
 
-## 🤖 Agent Bridge
+## Privacy Model
 
-Paper Pilot does not hard-code one model provider into the interface. The app writes a structured task, a selected agent processes it, and the result is saved back into the local workspace.
+Paper Pilot is built around local files and local state. AI providers receive only the context needed for the task you run, such as selected text, page excerpts, an image crop, or the original PDF path for Deep mode. For private or unpublished papers, choose the provider deliberately.
 
-```text
-Paper context -> bridge task -> Codex CLI / Claude Code -> saved result -> reader update
-```
+## Language Support
 
-This keeps the UI simple while leaving the agent layer replaceable.
+- Interface: English and Korean.
+- Translation target: Korean.
 
-Supported provider modes:
+## Install
 
-| Provider | Use it when |
-| --- | --- |
-| `codex-cli` | You want the default Codex CLI agent workflow. |
-| `claude-code` | You already use Claude Code and want it to read papers. |
-| `local-draft` | You want an offline UI demo or quick smoke check. |
-
-## 🖥️ Workspace Tour
-
-| Surface | Purpose |
-| --- | --- |
-| Library | Add PDFs, search papers, manage folders, bookmark important work. |
-| Reader | Read with page navigation, zoom, detected outline, link previews, and text selection tools. |
-| AI panel | Keep explanations, summaries, paper chat, highlights, citations, notes, and document info in one place. |
-| Translation sidecar | Read translated page segments beside the original page. |
-| Citation panel | Extract references, resolve links, write citation reasons, and copy BibTeX/CSV. |
-
-## 🛠️ Under The Hood
-
-| Layer | Stack |
-| --- | --- |
-| Desktop shell | Tauri 2 |
-| UI | React 18 + TypeScript + Vite |
-| PDF rendering | PDF.js |
-| Math rendering | KaTeX |
-| Local state | SQLite through Rust commands |
-| Agent I/O | JSON queue under `bridge/` |
-| Scholarly lookup | OpenAlex API |
-
-Paper Pilot stores its working state locally. The Tauri backend handles PDF import, SQLite persistence, export bundles, and worker startup. The React UI handles reading, selection, panels, translation display, and agent task orchestration.
-
-## 🚀 Install
-
-### 🧩 Prerequisites
+### Prerequisites
 
 - Node.js 20+
 - npm
 - Rust stable toolchain
 - Tauri 2 system prerequisites for your OS
-- Optional: Codex CLI or Claude Code CLI for full agent execution
+- Python 3.11+
+- Codex CLI or Claude Code CLI for full agent execution
 
-### 📥 Clone
+### Clone
 
 ```bash
 git clone https://github.com/MinseobKimm/paper-pilot.git
 cd paper-pilot
 ```
 
-### 📚 Install dependencies
+### Install App And Retrieval Dependencies
 
 ```bash
 npm install
+npm run setup:python
 ```
 
-### 🖥️ Run the desktop app
+`npm run setup:python` runs `python -m pip install -r requirements.txt`. That installs PaperQA2 through `paper-qa>=5`, which Fast Q&A expects. On Windows, `py -3 -m pip install -r requirements.txt` is also fine when the Python launcher is configured for Python 3.11 or newer.
+
+## Run
+
+### Desktop App
 
 ```bash
 npm run tauri:dev
 ```
 
-### 🌐 Run a browser preview
+### Browser Preview
 
 ```bash
 npm run dev
 ```
 
-Open `http://127.0.0.1:5174`.
+Open `http://127.0.0.1:5174`. The browser preview is useful for interface work; native file storage, SQLite persistence, and worker execution are available in the Tauri desktop app.
 
-The browser preview is useful for interface work. Native file storage, SQLite persistence, and worker execution are available in the Tauri desktop app.
-
-## 📦 Build
+## Build
 
 ```bash
 npm run build
@@ -210,7 +128,7 @@ The production executable is generated under:
 src-tauri/target/release/
 ```
 
-## ✅ Check
+## Check
 
 ```bash
 npm test
@@ -219,13 +137,13 @@ npm run desktop:check
 
 `npm test` runs the TypeScript and Vite build check. `npm run desktop:check` checks the Rust/Tauri backend.
 
-## ⚙️ Provider Setup
+## Provider Setup
 
-Open **Settings** in Paper Pilot and choose a provider.
+Open Settings in Paper Pilot and choose a provider.
 
 | Provider | Setup |
 | --- | --- |
-| Local draft | No setup required. |
+| Local draft | No external setup; useful for UI smoke checks. |
 | Codex CLI | Install Codex CLI and make sure `codex` is on `PATH`, or set `CODEX_BIN`. |
 | Claude Code | Install Claude Code and make sure `claude` is on `PATH`, or set `CLAUDE_CODE_BIN`. |
 
@@ -238,25 +156,35 @@ bridge/
   logs/       worker logs
 ```
 
-## 📁 Repository Layout
+## Repository Layout
 
 ```text
 paper-pilot/
   src/                 React UI and reading workflow
-  src/lib/             AI bridge, citations, scholarly lookup
+  src/lib/             AI bridge, translation, citations, scholarly lookup
   src-tauri/           Tauri backend, SQLite, worker commands
+  retrieval-adapter/   Fast Q&A retrieval bridge
   docs/                Korean README and product screenshots
 ```
 
 `bridge/`, `dist/`, release artifacts, QA captures, local PDFs, and agent outputs are runtime files. They are created locally and kept out of the repository.
 
-## 📄 License
+## Third-party Attribution
+
+Paper Pilot integrates third-party projects as dependencies and keeps their licenses separate from this repository's source license.
+
+- PaperQA2 / `paper-qa`: used by Fast Q&A for evidence retrieval. Source: [Future-House/paper-qa](https://github.com/Future-House/paper-qa). Package: [paper-qa on PyPI](https://pypi.org/project/paper-qa/). License: Apache License 2.0, copyright FutureHouse.
+- PaperQA2 research citation: Skarlinski et al., "Language agents achieve superhuman synthesis of scientific knowledge", arXiv:2409.13740. Use the upstream [CITATION.cff](https://github.com/Future-House/paper-qa/blob/main/CITATION.cff) when publishing work that relies on PaperQA2 results.
+
+Paper Pilot does not vendor PaperQA2 source code. It calls the installed Python package through the local retrieval adapter.
+
+## License
 
 Paper Pilot is released under the [Apache License 2.0](LICENSE).
 
-The license applies to the source code in this repository. Third-party libraries, AI providers, model outputs, and papers opened with Paper Pilot remain governed by their own licenses and terms.
+This license applies to the source code in this repository. Third-party libraries, AI providers, model outputs, and papers opened with Paper Pilot remain governed by their own licenses and terms.
 
-## 🤝 Contributing
+## Contributing
 
 Pull requests are welcome. Useful areas include reader polish, provider adapters, citation workflows, installers, export formats, and library ergonomics.
 

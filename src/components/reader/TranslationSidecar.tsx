@@ -73,6 +73,7 @@ export function TranslationSidecar(props: {
   const unitKey = props.units.map((unit) => `${unit.id}:${(unit.sourceIds ?? []).join(",")}`).join("|");
   useEffect(() => {
     selectedRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    selectedRef.current?.focus({ preventScroll: true });
   }, [props.selectedSentenceId, unitKey]);
 
   return (

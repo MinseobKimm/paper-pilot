@@ -113,6 +113,7 @@ type ReaderWorkspaceProps = {
   onDeleteAnnotationById: (id: string) => void;
   onOpenLinkPreview: (target: PdfLinkPreviewTarget) => void;
   onOpenWordMeaningPopup: (popup: WordPopup) => void;
+  onFocusTranslationSentence: (id: string) => void;
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
   onRunPendingBridgeWorkers: () => void;
   onPollBridge: () => void;
@@ -222,6 +223,17 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
       props.onToggleWordPopupClosed();
     }
     void setSetting(wordMeaningLookupEnabledSettingKey, next);
+  }
+
+  function handleWordSelect(popup: WordPopup) {
+    if (props.translationPanelOpen) {
+      props.onToggleWordPopupClosed();
+      if (popup.sourceSentenceId) {
+        props.onFocusTranslationSentence(popup.sourceSentenceId);
+      }
+      return;
+    }
+    props.onOpenWordMeaningPopup(popup);
   }
 
   return (
@@ -360,7 +372,7 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
                   }
                   textLayoutMode={textLayoutMode}
                   onTextLayoutReady={props.onRememberPageTextLayout}
-                  onWordSelect={props.onOpenWordMeaningPopup}
+                  onWordSelect={handleWordSelect}
                   regionDrag={props.regionDrag}
                   onTextReady={props.onCreatePageText}
                   onOutlineReady={props.onRememberOutlineAnchors}

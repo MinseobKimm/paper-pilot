@@ -1085,6 +1085,14 @@ function App() {
     scrollPdfSentenceIntoView(id);
   }
 
+  function focusTranslationSentence(id: string) {
+    setSelectedSentenceId(id);
+    const page = Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
+    if (page > 0 && page !== pageCursor) {
+      setPageCursor(page);
+    }
+  }
+
   const {
     createPageText,
     rememberPageImage,
@@ -1444,6 +1452,7 @@ function App() {
             onDeleteAnnotationById={(id) => void deleteAnnotationById(id)}
             onOpenLinkPreview={(target) => void openLinkPreview(target)}
             onOpenWordMeaningPopup={openWordMeaningPopup}
+            onFocusTranslationSentence={focusTranslationSentence}
             onQueueTask={(type, payload) => void queueTask(type, payload)}
             onRunPendingBridgeWorkers={() => void runPendingBridgeWorkers()}
             onPollBridge={() => void pollBridge()}

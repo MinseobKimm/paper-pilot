@@ -1,5 +1,6 @@
 export function cleanAiOutput(value: string, status = "") {
   const text = value
+    .replace(/^\s*Token estimate:[^\n]*(?:\r?\n\r?\n)?/i, "")
     .replace(/(?:[A-Za-z]+ bridge task|Agent task):[^\n]+/gi, "")
     .replace(/Status: local draft is ready[^\n]*/gi, "")
     .replace(/Status: waiting for[^\n]*/gi, "")
