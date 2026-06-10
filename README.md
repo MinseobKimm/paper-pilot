@@ -186,6 +186,12 @@ Open Settings in Paper Pilot and choose a provider.
 | Codex CLI | Install Codex CLI and make sure `codex` is on `PATH`, or set `CODEX_BIN`. |
 | Claude Code | Install Claude Code and make sure `claude` is on `PATH`, or set `CLAUDE_CODE_BIN`. |
 
+### Claude Code bridge
+
+Paper Pilot calls Claude Code through the official non-interactive CLI path: `claude --print` with `--output-format stream-json`. The bridge captures the final `result`, stores the Claude session ID for follow-up paper chat, and writes the parsed response to `bridge/logs/*.response.md`.
+
+For privacy and safety, the Claude Code bridge runs with `--permission-mode dontAsk`, restricts tools to `Read,Glob,Grep`, disables implicit MCP loading with `--strict-mcp-config`, and grants file access with `--add-dir` for the project and, in Deep PDF chat, the PDF's parent directory. Install and authenticate Claude Code first (`claude --version`, then `claude auth login` or your organization's supported authentication flow).
+
 ## Third-party Attribution
 
 Paper Pilot integrates third-party projects as dependencies and keeps their licenses separate from this repository's source license.

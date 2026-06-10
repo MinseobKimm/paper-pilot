@@ -188,6 +188,12 @@ Paper Pilot의 Settings에서 provider를 선택합니다.
 | Codex CLI | Codex CLI를 설치하고 `codex`가 `PATH`에 잡히게 하거나 `CODEX_BIN`을 지정합니다. |
 | Claude Code | Claude Code를 설치하고 `claude`가 `PATH`에 잡히게 하거나 `CLAUDE_CODE_BIN`을 지정합니다. |
 
+### Claude Code bridge
+
+Paper Pilot은 Claude Code의 공식 비대화형 CLI 경로인 `claude --print`와 `--output-format stream-json`을 사용합니다. 브릿지는 최종 `result`를 캡처하고, 후속 paper chat을 위해 Claude session ID를 저장하며, 파싱된 응답을 `bridge/logs/*.response.md`에 남깁니다.
+
+개인정보와 안전을 위해 Claude Code bridge는 `--permission-mode dontAsk`로 실행하고, 도구를 `Read,Glob,Grep`로 제한하며, `--strict-mcp-config`로 암묵적 MCP 로딩을 끕니다. 파일 접근은 `--add-dir`로 프로젝트 디렉터리와 Deep PDF chat에서 PDF 상위 디렉터리만 허용합니다. 먼저 Claude Code를 설치하고 인증하세요(`claude --version`, 이후 `claude auth login` 또는 조직의 인증 방식).
+
 ## Third-party Attribution
 
 Paper Pilot은 third-party 프로젝트를 의존성으로 통합하며, 각 프로젝트의 라이선스는 이 저장소의 소스 라이선스와 별도로 유지됩니다.

@@ -1575,6 +1575,9 @@ fn command_candidates(provider: &str) -> Vec<PathBuf> {
                 .join("npm")
                 .join("claude"),
         );
+        if let Some(base) = local_appdata.clone() {
+            raw.push(base.join("Microsoft").join("WindowsApps").join("claude"));
+        }
         raw.push(PathBuf::from("/opt/homebrew/bin/claude"));
         raw.push(PathBuf::from("/usr/local/bin/claude"));
     } else {
@@ -1907,6 +1910,11 @@ fn claude_args(
     allow_resume: bool,
     allow_pdf_access: bool,
 ) -> Vec<String> {
+    let max_turns = if task.task_type == "chatWithPaper" && allow_pdf_access {
+        "8"
+    } else {
+        "4"
+    };
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -1914,9 +1922,14 @@ fn claude_args(
         "stream-json".to_string(),
         "--include-partial-messages".to_string(),
         "--permission-mode".to_string(),
-        "bypassPermissions".to_string(),
+        "dontAsk".to_string(),
         "--tools".to_string(),
-        "Read,Glob,Grep,Bash".to_string(),
+        "Read,Glob,Grep".to_string(),
+        "--allowedTools".to_string(),
+        "Read,Glob,Grep".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--max-turns".to_string(),
+        max_turns.to_string(),
         "--add-dir".to_string(),
         root.to_string_lossy().to_string(),
     ];
@@ -1942,6 +1955,15 @@ fn claude_args(
     {
         args.push("--model".to_string());
         args.push(model.to_string());
+    }
+    if let Some(effort) = task
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| matches!(*value, "low" | "medium" | "high" | "xhigh" | "max"))
+    {
+        args.push("--effort".to_string());
+        args.push(effort.to_string());
     }
     args
 }
@@ -2139,6 +2161,9 @@ fn run_agent_stage(
     } else {
         parse_codex_output(&stdout, response_file)
     };
+    if task.provider == "claude-code" {
+        write_agent_response_file(response_file, &content)?;
+    }
     Ok((exit_code, stdout, stderr, session_id, content))
 }
 
@@ -2247,6 +2272,24 @@ fn collect_text_parts(value: &Value) -> Vec<String> {
     parts
 }
 
+fn collect_claude_error(value: &Value) -> Option<String> {
+    if let Some(error) = value.get("error") {
+        if let Some(message) = error.get("message").and_then(Value::as_str) {
+            return Some(message.to_string());
+        }
+        if let Some(message) = error.as_str() {
+            return Some(message.to_string());
+        }
+    }
+    if let Some(message) = value.get("message").and_then(Value::as_str) {
+        return Some(message.to_string());
+    }
+    if let Some(detail) = value.get("detail").and_then(Value::as_str) {
+        return Some(detail.to_string());
+    }
+    None
+}
+
 fn readable_agent_error(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2343,17 +2386,24 @@ fn parse_claude_output(stdout: &str) -> (Option<String>, String) {
     let mut session_id = None;
     let mut messages = Vec::new();
     let mut result = String::new();
-    for line in stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+    let mut errors = Vec::new();
+    let mut parsed_any = false;
+    for event in stdout.lines().map(str::trim).filter_map(|line| {
+        if line.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<Value>(line).ok()
+    }) {
+        parsed_any = true;
         if event.get("type").and_then(Value::as_str) == Some("system")
             && event.get("subtype").and_then(Value::as_str) == Some("init")
         {
+            session_id = event
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+        }
+        if session_id.is_none() {
             session_id = event
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -2364,19 +2414,65 @@ fn parse_claude_output(stdout: &str) -> (Option<String>, String) {
                 messages.extend(collect_text_parts(message));
             }
         }
-        if event.get("type").and_then(Value::as_str) == Some("result") {
-            if let Some(text) = event.get("result").and_then(Value::as_str) {
-                result = text.to_string();
+        if let Some(text) = event.get("result").and_then(Value::as_str) {
+            result = text.to_string();
+        }
+        if result.trim().is_empty() {
+            if let Some(structured) = event.get("structured_output") {
+                result = serde_json::to_string_pretty(structured).unwrap_or_default();
+            }
+        }
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+        if event_type == "error"
+            || (event_type == "result" && !matches!(subtype, "" | "success" | "init"))
+            || (result.trim().is_empty() && event.get("error").is_some())
+        {
+            if let Some(message) = collect_claude_error(&event) {
+                errors.push(readable_agent_error(&message));
             }
         }
     }
-    let content = messages.join("\n\n").trim().to_string();
+
+    if !parsed_any {
+        if let Ok(event) = serde_json::from_str::<Value>(stdout.trim()) {
+            session_id = event
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            if let Some(text) = event.get("result").and_then(Value::as_str) {
+                result = text.to_string();
+            } else if let Some(structured) = event.get("structured_output") {
+                result = serde_json::to_string_pretty(structured).unwrap_or_default();
+            }
+            if let Some(message) = collect_claude_error(&event) {
+                errors.push(readable_agent_error(&message));
+            }
+        }
+    }
+
+    let content = result.trim().to_string();
     let content = if content.is_empty() {
-        result.trim().to_string()
+        messages.join("\n\n").trim().to_string()
+    } else {
+        content
+    };
+    let content = if content.is_empty() && !errors.is_empty() {
+        errors.join("\n")
     } else {
         content
     };
     (session_id, content)
+}
+
+fn write_agent_response_file(path: &Path, content: &str) -> AppResult<()> {
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, content).map_err(|error| error.to_string())
 }
 
 fn run_agent_command(
@@ -2855,6 +2951,9 @@ fn run_agent_task(
     } else {
         parse_codex_output(&stdout, &response_file)
     };
+    if task.provider == "claude-code" {
+        write_agent_response_file(&response_file, &content)?;
+    }
     let provider_session_id = new_session_id.or(task.provider_session_id.clone());
     let saw_agent_error_event = task.provider == "codex-cli"
         && stdout.lines().any(|line| {
@@ -3240,6 +3339,63 @@ mod tests {
         assert!(args
             .windows(3)
             .any(|window| window == ["resume", session_id, "-"]));
+    }
+
+    #[test]
+    fn claude_args_use_read_only_non_interactive_mode() {
+        let mut task = bridge_task_with_ask_mode("deep");
+        task.provider = "claude-code".to_string();
+        let args = claude_args(&task, Path::new("C:/workspace"), false, true);
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--permission-mode", "dontAsk"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--tools", "Read,Glob,Grep"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--allowedTools", "Read,Glob,Grep"]));
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(args.windows(2).any(|window| window == ["--max-turns", "8"]));
+        assert!(!args.iter().any(|arg| arg == "bypassPermissions"));
+        assert!(!args.iter().any(|arg| arg == "Bash"));
+    }
+
+    #[test]
+    fn claude_args_resume_existing_chat_session() {
+        let session_id = "claude-session-123";
+        let mut task = bridge_task_with_ask_mode_and_session("deep", Some(session_id));
+        task.provider = "claude-code".to_string();
+        let args = claude_args(&task, Path::new("C:/workspace"), true, true);
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--resume", session_id]));
+    }
+
+    #[test]
+    fn parse_claude_stream_json_prefers_final_result() {
+        let stdout = r#"{"type":"system","subtype":"init","session_id":"session-1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"intermediate"}]}}
+{"type":"result","subtype":"success","session_id":"session-1","result":"final answer"}"#;
+        let (session_id, content) = parse_claude_output(stdout);
+        assert_eq!(session_id.as_deref(), Some("session-1"));
+        assert_eq!(content, "final answer");
+    }
+
+    #[test]
+    fn parse_claude_single_json_output() {
+        let stdout =
+            r#"{"session_id":"session-json","result":"json answer","total_cost_usd":0.01}"#;
+        let (session_id, content) = parse_claude_output(stdout);
+        assert_eq!(session_id.as_deref(), Some("session-json"));
+        assert_eq!(content, "json answer");
+    }
+
+    #[test]
+    fn parse_claude_result_error_message() {
+        let stdout = r#"{"type":"result","subtype":"error","error":{"message":"not logged in"}}"#;
+        let (_session_id, content) = parse_claude_output(stdout);
+        assert_eq!(content, "not logged in");
     }
 }
 
