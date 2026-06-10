@@ -45,6 +45,8 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 
 ### Top Bar
 
+![Paper Pilot top bar controls](docs/images/usage-top-bar.png)
+
 - Library opens the paper library from anywhere in the app.
 - Settings opens language, provider, translation, and display preferences.
 - In Reader, Outline toggles the left outline panel and Translation toggles the sentence translation panel.
@@ -54,6 +56,8 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 
 ### Library Sidebar
 
+![Paper Pilot library sidebar](docs/images/usage-library-sidebar.png)
+
 - Add PDF imports papers into the selected folder.
 - Create folders from the folder area, then select a folder to filter the library.
 - Search filters papers by title, authors, year, abstract, and folder context.
@@ -62,11 +66,15 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 
 ### Reader Panels
 
+![Paper Pilot reader panels](docs/images/usage-reader-panels.png)
+
 - The left outline panel jumps to detected sections or pages. Switch between list and grid views depending on whether you want section titles or compact page navigation.
 - The translation panel shows sentence-level Korean translation beside the current page. Use refresh when the page needs a new translation, and click a translated sentence to sync back to the PDF.
 - The right panel has tabs for Study tools, Highlights, Quote cards, Notes, and Citations. Use Study for paper Q&A, Highlights for saved marks, Notes for Markdown notes, and Citations for reference extraction and export.
 
 ### PDF Tools
+
+![Paper Pilot floating PDF tools](docs/images/usage-pdf-tools.png)
 
 - Select text to open the quick toolbar: Explain, Highlight, Translate, Comment, or Copy.
 - Use the floating reader tools to pick highlight colors, erase highlights, explain a drawn region, bookmark the current reading position, toggle auto translation, toggle word-meaning lookup, or build missing word meanings.
