@@ -78,6 +78,102 @@ function updateSelectedSentenceFlags(layer: HTMLElement, selectedSentenceIds: st
   });
 }
 
+let textMeasureContext: CanvasRenderingContext2D | null = null;
+
+function measuredTextWidth(text: string, fontSize: number, fontFamily: string) {
+  if (!text) {
+    return 0;
+  }
+  textMeasureContext = textMeasureContext ?? document.createElement("canvas").getContext("2d");
+  if (!textMeasureContext) {
+    return text.length;
+  }
+  textMeasureContext.font = `${fontSize}px ${fontFamily}`;
+  return textMeasureContext.measureText(text).width;
+}
+
+function textOffsetWithinBox(
+  raw: string,
+  offset: number,
+  targetWidth: number,
+  fontSize: number,
+  fontFamily: string,
+) {
+  const clamped = Math.max(0, Math.min(raw.length, offset));
+  if (clamped === 0) {
+    return 0;
+  }
+  if (clamped === raw.length) {
+    return targetWidth;
+  }
+  const fullWidth = measuredTextWidth(raw, fontSize, fontFamily);
+  if (fullWidth <= 0) {
+    return targetWidth * (clamped / Math.max(1, raw.length));
+  }
+  return targetWidth * (measuredTextWidth(raw.slice(0, clamped), fontSize, fontFamily) / fullWidth);
+}
+
+function sentenceSegmentsForTextBox(
+  raw: string,
+  itemStart: number,
+  itemEnd: number,
+  targetWidth: number,
+  fontSize: number,
+  fontFamily: string,
+  bounds: Array<{ id: string; start: number; end: number }>,
+) {
+  const overlaps = bounds
+    .map((bound) => ({
+      id: bound.id,
+      start: Math.max(itemStart, bound.start),
+      end: Math.min(itemEnd, bound.end),
+    }))
+    .filter((segment) => segment.end > segment.start)
+    .map((segment) => {
+      let start = Math.max(0, segment.start - itemStart);
+      let end = Math.min(raw.length, segment.end - itemStart);
+      while (start < end && /\s/.test(raw[start])) {
+        start += 1;
+      }
+      while (end > start && /\s/.test(raw[end - 1])) {
+        end -= 1;
+      }
+      return { ...segment, rawStart: start, rawEnd: end, text: raw.slice(start, end) };
+    })
+    .filter((segment) => segment.text.trim().length > 0);
+  const segments: Array<{ id: string; rawStart: number; rawEnd: number; text: string }> = [];
+  let cursor = 0;
+  for (const overlap of overlaps.sort((a, b) => a.rawStart - b.rawStart || a.rawEnd - b.rawEnd)) {
+    if (overlap.rawStart > cursor) {
+      const gapText = raw.slice(cursor, overlap.rawStart);
+      if (gapText.trim()) {
+        segments.push({ id: "", rawStart: cursor, rawEnd: overlap.rawStart, text: gapText });
+      }
+    }
+    segments.push(overlap);
+    cursor = Math.max(cursor, overlap.rawEnd);
+  }
+  if (cursor < raw.length) {
+    const gapText = raw.slice(cursor);
+    if (gapText.trim()) {
+      segments.push({ id: "", rawStart: cursor, rawEnd: raw.length, text: gapText });
+    }
+  }
+  if (segments.length === 0) {
+    segments.push({ id: "", rawStart: 0, rawEnd: raw.length, text: raw });
+  }
+  return segments.map((segment) => {
+    const left = textOffsetWithinBox(raw, segment.rawStart, targetWidth, fontSize, fontFamily);
+    const right = textOffsetWithinBox(raw, segment.rawEnd, targetWidth, fontSize, fontFamily);
+    return {
+      text: segment.text,
+      sentenceId: segment.id,
+      leftOffset: left,
+      width: Math.max(1, right - left),
+    };
+  });
+}
+
 export function PdfPageView(props: PdfPageViewProps) {
   const ui = useUiStrings();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -243,26 +339,29 @@ export function PdfPageView(props: PdfPageViewProps) {
         const itemStart = itemIndex >= 0 ? itemIndex : textCursor;
         const itemEnd = itemStart + raw.length;
         textCursor = itemEnd;
-        const sentence = bounds.find((bound) => itemStart < bound.end && itemEnd > bound.start);
         const fontHeight = sourceBox.fontSize;
-        const span = document.createElement("span");
-        span.textContent = `${raw} `;
-        span.style.left = `${sourceBox.rect.left}px`;
-        span.style.top = `${sourceBox.rect.top}px`;
-        span.style.fontSize = `${fontHeight}px`;
-        span.style.height = `${sourceBox.rect.height}px`;
-        span.style.fontFamily = sourceBox.fontName ? `${sourceBox.fontName}, sans-serif` : "sans-serif";
-        span.dataset.text = raw;
-        if (sentence) {
-          span.dataset.sentenceId = sentence.id;
-          span.classList.add("sentence-token");
-        }
-        layer.appendChild(span);
-        const targetWidth = sourceBox.rect.width;
-        const naturalWidth = span.getBoundingClientRect().width;
-        if (targetWidth > 0 && naturalWidth > 0) {
-          const scaleX = Math.min(3, Math.max(0.2, targetWidth / naturalWidth));
-          span.style.transform = `scaleX(${scaleX})`;
+        const fontFamily = sourceBox.fontName ? `${sourceBox.fontName}, sans-serif` : "sans-serif";
+        const targetWidth = sourceBox.rect.width > 0 ? sourceBox.rect.width : Math.max(1, measuredTextWidth(raw, fontHeight, fontFamily));
+        const segments = sentenceSegmentsForTextBox(raw, itemStart, itemEnd, targetWidth, fontHeight, fontFamily, bounds);
+        for (const segment of segments) {
+          const span = document.createElement("span");
+          span.textContent = segment.text;
+          span.style.left = `${sourceBox.rect.left + segment.leftOffset}px`;
+          span.style.top = `${sourceBox.rect.top}px`;
+          span.style.fontSize = `${fontHeight}px`;
+          span.style.height = `${sourceBox.rect.height}px`;
+          span.style.fontFamily = fontFamily;
+          span.dataset.text = segment.text;
+          if (segment.sentenceId) {
+            span.dataset.sentenceId = segment.sentenceId;
+            span.classList.add("sentence-token");
+          }
+          layer.appendChild(span);
+          const naturalWidth = span.getBoundingClientRect().width;
+          if (segment.width > 0 && naturalWidth > 0) {
+            const scaleX = Math.min(3, Math.max(0.2, segment.width / naturalWidth));
+            span.style.transform = `scaleX(${scaleX})`;
+          }
         }
         textBoxes.push({
           text: raw,
@@ -271,7 +370,7 @@ export function PdfPageView(props: PdfPageViewProps) {
           rect: {
             left: sourceBox.rect.left,
             top: sourceBox.rect.top,
-            width: targetWidth > 0 ? targetWidth : naturalWidth,
+            width: targetWidth,
             height: sourceBox.rect.height,
           },
           fontSize: fontHeight,
