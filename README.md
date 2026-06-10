@@ -41,6 +41,37 @@ Read the original PDF with outline navigation, page search, zoom, highlights, li
 
 Ask about a selected page region, figure, table, or equation. Paper Pilot sends only the task context needed by the selected agent and saves the answer back to the paper.
 
+## Basic Usage
+
+### Top Bar
+
+- Library opens the paper library from anywhere in the app.
+- Settings opens language, provider, translation, and display preferences.
+- In Reader, Outline toggles the left outline panel and Translation toggles the sentence translation panel.
+- Use the zoom selector, zoom buttons, page box, and search field to move around the PDF.
+- Share exports a readable copy when an open paper has page images or rendered annotations available.
+- Panel opens or closes the right workspace panel for AI, highlights, notes, and citations.
+
+### Library Sidebar
+
+- Add PDF imports papers into the selected folder.
+- Create folders from the folder area, then select a folder to filter the library.
+- Search filters papers by title, authors, year, abstract, and folder context.
+- Open a paper from its card, bookmark important papers, and edit paper details from the library inspector.
+- Select multiple papers when you want to move or delete them together.
+
+### Reader Panels
+
+- The left outline panel jumps to detected sections or pages. Switch between list and grid views depending on whether you want section titles or compact page navigation.
+- The translation panel shows sentence-level Korean translation beside the current page. Use refresh when the page needs a new translation, and click a translated sentence to sync back to the PDF.
+- The right panel has tabs for Study tools, Highlights, Quote cards, Notes, and Citations. Use Study for paper Q&A, Highlights for saved marks, Notes for Markdown notes, and Citations for reference extraction and export.
+
+### PDF Tools
+
+- Select text to open the quick toolbar: Explain, Highlight, Translate, Comment, or Copy.
+- Use the floating reader tools to pick highlight colors, erase highlights, explain a drawn region, bookmark the current reading position, toggle auto translation, toggle word-meaning lookup, or build missing word meanings.
+- Click page citations in AI answers to jump back to the cited page.
+
 ## Core Features
 
 - Local-first paper workspace with SQLite state and local files.
