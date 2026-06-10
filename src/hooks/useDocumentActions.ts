@@ -43,7 +43,6 @@ type DocumentActionsInput = {
   setIsBusy: (busy: boolean) => void;
   setActivePanel: (panel: "ai" | "activity" | "citations" | "notes" | "info") => void;
   setFloatingResultId: (id: string | null) => void;
-  setRightPanelOpen: (open: boolean) => void;
 };
 
 export function useDocumentActions(input: DocumentActionsInput) {
@@ -69,7 +68,6 @@ export function useDocumentActions(input: DocumentActionsInput) {
     setIsBusy,
     setActivePanel,
     setFloatingResultId,
-    setRightPanelOpen,
   } = input;
   const [linkPreview, setLinkPreview] = useState<LinkPreviewState | null>(null);
   const [linkPreviewLoading, setLinkPreviewLoading] = useState(false);
@@ -222,8 +220,6 @@ export function useDocumentActions(input: DocumentActionsInput) {
       return;
     }
     setFloatingResultId(result.id);
-    setRightPanelOpen(true);
-    setActivePanel("ai");
   }
 
   async function openLinkPreview(target: PdfLinkPreviewTarget) {

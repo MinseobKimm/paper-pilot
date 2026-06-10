@@ -21,7 +21,7 @@ import { useReaderSelection } from "./hooks/useReaderSelection";
 import { useReaderViewportSync } from "./hooks/useReaderViewportSync";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type SetStateAction } from "react";
 import type { PdfDocumentProxy } from "./lib/pdfDocument";
 import { isAgentProvider, normalizeAiProviderKind, runAiTask } from "./lib/ai";
 import { makeId, nowIso } from "./lib/ids";
@@ -40,7 +40,12 @@ import {
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
   pageTextLayoutSourceSettingKey,
+  readerOutlineCompactSettingKey,
+  readerOutlineOpenSettingKey,
   readerBookmarksFromSettings,
+  readerRightPanelOpenSettingKey,
+  readerTranslationPanelOpenSettingKey,
+  settingsBoolean,
   type ReaderBookmark,
 } from "./lib/readerSettings";
 import {
@@ -189,15 +194,23 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [hoverSource, setHoverSource] = useState<string | null>(null);
   const [chatDraft, setChatDraft] = useState("");
-  const [outlineCompact, setOutlineCompact] = useState(false);
-  const [outlineOpen, setOutlineOpen] = useState(true);
+  const [outlineCompact, setOutlineCompactState] = useState(() =>
+    settingsBoolean(initialState.settings, readerOutlineCompactSettingKey, false),
+  );
+  const [outlineOpen, setOutlineOpenState] = useState(() =>
+    settingsBoolean(initialState.settings, readerOutlineOpenSettingKey, true),
+  );
   const [assistantMode, setAssistantMode] = useState<ReaderAssistantMode>("study");
   const [floatingResultId, setFloatingResultId] = useState<string | null>(null);
   const [floatingAvoidRect, setFloatingAvoidRect] = useState<ViewportRect | null>(null);
   const [selectedSentenceId, setSelectedSentenceId] = useState<string | null>(null);
   const [translationEligiblePages, setTranslationEligiblePages] = useState<Set<number>>(() => new Set([1]));
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [translationPanelOpen, setTranslationPanelOpen] = useState(false);
+  const [rightPanelOpen, setRightPanelOpenState] = useState(() =>
+    settingsBoolean(initialState.settings, readerRightPanelOpenSettingKey, true),
+  );
+  const [translationPanelOpen, setTranslationPanelOpenState] = useState(() =>
+    settingsBoolean(initialState.settings, readerTranslationPanelOpenSettingKey, false),
+  );
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<Partial<Record<AiProviderKind, AgentProviderStatus>>>({});
   const [isBusy, setIsBusy] = useState(false);
@@ -214,6 +227,10 @@ function App() {
   const incompleteTranslationRetriesRef = useRef<Map<string, number>>(new Map());
   const outlineRequestsRef = useRef<Set<string>>(new Set());
   const documentLayoutRequestsRef = useRef<Set<string>>(new Set());
+  const outlineCompactRef = useRef(outlineCompact);
+  const outlineOpenRef = useRef(outlineOpen);
+  const rightPanelOpenRef = useRef(rightPanelOpen);
+  const translationPanelOpenRef = useRef(translationPanelOpen);
 
   useEffect(() => {
     stateRef.current = state;
@@ -226,6 +243,90 @@ function App() {
       return draft;
     });
   }, []);
+
+  const persistReaderBooleanSetting = useCallback(
+    (key: string, next: boolean) => {
+      const value = next ? "true" : "false";
+      if (stateRef.current.settings[key] === value) {
+        return;
+      }
+      stateRef.current = {
+        ...stateRef.current,
+        settings: {
+          ...stateRef.current.settings,
+          [key]: value,
+        },
+      };
+      patchState((draft) => {
+        draft.settings[key] = value;
+      });
+      void setSetting(key, value);
+    },
+    [patchState],
+  );
+
+  const setPersistentReaderBoolean = useCallback(
+    (
+      ref: MutableRefObject<boolean>,
+      setter: (value: SetStateAction<boolean>) => void,
+      key: string,
+      update: SetStateAction<boolean>,
+    ) => {
+      const next = typeof update === "function" ? (update as (current: boolean) => boolean)(ref.current) : update;
+      if (ref.current !== next) {
+        ref.current = next;
+        persistReaderBooleanSetting(key, next);
+      }
+      setter(next);
+    },
+    [persistReaderBooleanSetting],
+  );
+
+  const setOutlineCompact = useCallback(
+    (update: SetStateAction<boolean>) =>
+      setPersistentReaderBoolean(outlineCompactRef, setOutlineCompactState, readerOutlineCompactSettingKey, update),
+    [setPersistentReaderBoolean],
+  );
+  const setOutlineOpen = useCallback(
+    (update: SetStateAction<boolean>) =>
+      setPersistentReaderBoolean(outlineOpenRef, setOutlineOpenState, readerOutlineOpenSettingKey, update),
+    [setPersistentReaderBoolean],
+  );
+  const setRightPanelOpen = useCallback(
+    (update: SetStateAction<boolean>) =>
+      setPersistentReaderBoolean(rightPanelOpenRef, setRightPanelOpenState, readerRightPanelOpenSettingKey, update),
+    [setPersistentReaderBoolean],
+  );
+  const setTranslationPanelOpen = useCallback(
+    (update: SetStateAction<boolean>) =>
+      setPersistentReaderBoolean(
+        translationPanelOpenRef,
+        setTranslationPanelOpenState,
+        readerTranslationPanelOpenSettingKey,
+        update,
+      ),
+    [setPersistentReaderBoolean],
+  );
+
+  useEffect(() => {
+    const nextOutlineCompact = settingsBoolean(state.settings, readerOutlineCompactSettingKey, false);
+    const nextOutlineOpen = settingsBoolean(state.settings, readerOutlineOpenSettingKey, true);
+    const nextRightPanelOpen = settingsBoolean(state.settings, readerRightPanelOpenSettingKey, true);
+    const nextTranslationPanelOpen = settingsBoolean(state.settings, readerTranslationPanelOpenSettingKey, false);
+    outlineCompactRef.current = nextOutlineCompact;
+    outlineOpenRef.current = nextOutlineOpen;
+    rightPanelOpenRef.current = nextRightPanelOpen;
+    translationPanelOpenRef.current = nextTranslationPanelOpen;
+    setOutlineCompactState((current) => (current === nextOutlineCompact ? current : nextOutlineCompact));
+    setOutlineOpenState((current) => (current === nextOutlineOpen ? current : nextOutlineOpen));
+    setRightPanelOpenState((current) => (current === nextRightPanelOpen ? current : nextRightPanelOpen));
+    setTranslationPanelOpenState((current) => (current === nextTranslationPanelOpen ? current : nextTranslationPanelOpen));
+  }, [
+    state.settings.readerOutlineCompact,
+    state.settings.readerOutlineOpen,
+    state.settings.readerRightPanelOpen,
+    state.settings.readerTranslationPanelOpen,
+  ]);
 
   const upsertAiResultInState = useCallback((result: AiResultRecord, removeIds: string[] = []) => {
     setState((current) => {
@@ -630,6 +731,7 @@ function App() {
       }
       return null;
     }
+    const isExplanationTask = taskType === "explainText" || taskType === "explainRegionImage";
     const providerKind = normalizeAiProviderKind(state.settings.aiProvider);
     const optimisticChatId =
       taskType === "chatWithPaper" && typeof payload.question === "string" ? makeId("chat-pending") : "";
@@ -649,7 +751,7 @@ function App() {
         model: selectedAiModelForRun(state.settings),
       });
       setAssistantMode("study");
-      if (!options.keepPanel) {
+      if (!options.keepPanel && !isExplanationTask) {
         setActivePanel("ai");
       }
     }
@@ -695,12 +797,13 @@ function App() {
         providerSessionId,
       });
       upsertAiResultInState(queued, optimisticChatId ? [optimisticChatId] : []);
-      setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
-      if (taskType === "explainText" || taskType === "explainRegionImage") {
-        setFloatingResultId(queued.id);
-        setRightPanelOpen(true);
+      if (!isExplanationTask) {
+        setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
       }
-      if (!options.keepPanel) {
+      if (isExplanationTask) {
+        setFloatingResultId(queued.id);
+      }
+      if (!options.keepPanel && !isExplanationTask) {
         setActivePanel("ai");
       }
       if (queued.status === "pending" && isAgentProvider(providerKind)) {
@@ -1009,7 +1112,6 @@ function App() {
     setIsBusy,
     setActivePanel,
     setFloatingResultId,
-    setRightPanelOpen,
   });
 
   const {
@@ -1398,7 +1500,6 @@ function App() {
               setMode(activeDocument ? "reader" : mode);
               setOutlineOpen(true);
             }
-            setOutlineCompact(false);
           }}
           onStartRegionExplain={() => {
             setRegionMode(true);

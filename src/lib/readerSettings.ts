@@ -13,6 +13,10 @@ export const defaultReaderZoom = 1.05;
 export const minReaderZoom = 0.55;
 export const maxReaderZoom = 2.5;
 export const nextPageTranslationReadProgress = 0.82;
+export const readerOutlineOpenSettingKey = "readerOutlineOpen";
+export const readerOutlineCompactSettingKey = "readerOutlineCompact";
+export const readerTranslationPanelOpenSettingKey = "readerTranslationPanelOpen";
+export const readerRightPanelOpenSettingKey = "readerRightPanelOpen";
 export const layoutDefaults = {
   outline: 220,
   translation: 360,
@@ -33,6 +37,17 @@ export function clampNumber(value: number, min: number, max: number) {
 export function settingsNumber(settings: Record<string, string>, key: string, fallback: number, min: number, max: number) {
   const value = Number(settings[key]);
   return Number.isFinite(value) ? clampNumber(value, min, max) : fallback;
+}
+
+export function settingsBoolean(settings: Record<string, string>, key: string, fallback: boolean) {
+  const value = settings[key];
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return fallback;
 }
 
 export function documentZoomSettingKey(documentId: string) {
