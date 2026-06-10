@@ -6,7 +6,13 @@ import { normalizeComparable } from "../lib/textUtils";
 import { annotationKey } from "../lib/annotationHelpers";
 import { colorForHighlightTag, parseAutoHighlightCandidates } from "../lib/autoHighlights";
 import { chatInputTextWithMode, wordMeaningTaskType } from "../lib/aiResults";
-import { isStalePendingTranslation, translationInputLanguage, translationInputText, translationRequestKey } from "../lib/translations";
+import {
+  isStalePendingTranslation,
+  stalePendingTranslationMs,
+  translationInputLanguage,
+  translationInputText,
+  translationRequestKey,
+} from "../lib/translations";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
 import { estimateTokens, parseTokenEstimate, prependTokenEstimate } from "../lib/tokenEstimate";
 
@@ -47,6 +53,21 @@ function aiResultContentMatches(left: AiResultRecord, right: AiResultRecord) {
     left.model === right.model &&
     left.providerSessionId === right.providerSessionId
   );
+}
+
+function isStalePendingAiResult(result: AiResultRecord) {
+  if (result.status !== "pending") {
+    return false;
+  }
+  if (result.taskType.toString() === "translatePage") {
+    return isStalePendingTranslation(result);
+  }
+  const createdAt = Date.parse(result.createdAt);
+  return Number.isFinite(createdAt) && Date.now() - createdAt > stalePendingTranslationMs;
+}
+
+function isFreshPendingAiResult(result: AiResultRecord) {
+  return result.status === "pending" && !isStalePendingAiResult(result);
 }
 
 export function useBridgeResults(input: BridgeResultsInput) {
@@ -116,7 +137,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
   }
 
   async function pollBridge(silent = false) {
-    const pending = activeAiResults.filter((result) => result.status === "pending");
+    const pending = activeAiResults.filter((result) => result.status === "pending" && (!silent || isFreshPendingAiResult(result)));
     if (pending.length === 0) {
       if (!silent) {
         showToast(ui.noPendingAgentTasks);
@@ -223,11 +244,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
   }
 
   useEffect(() => {
-    if (
-      !activeAiResults.some(
-        (result) => result.status === "pending" && (result.taskType.toString() !== "translatePage" || !isStalePendingTranslation(result)),
-      )
-    ) {
+    if (!activeAiResults.some(isFreshPendingAiResult)) {
       return;
     }
     const timer = window.setInterval(() => {

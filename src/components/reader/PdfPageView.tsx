@@ -52,11 +52,40 @@ type PdfPageViewProps = {
   onPreviewLink: (target: PdfLinkPreviewTarget) => void;
 };
 
+function updateTextSpanFlags(layer: HTMLElement, searchTerm: string, hoverSource: string | null) {
+  const query = searchTerm.trim().toLowerCase();
+  const hover = hoverSource?.toLowerCase() ?? "";
+  layer.querySelectorAll<HTMLElement>("[data-text]").forEach((span) => {
+    const raw = span.dataset.text || "";
+    const lower = raw.toLowerCase();
+    span.classList.toggle("search-hit", query.length > 1 && lower.includes(query));
+    span.classList.toggle("hover-hit", Boolean(hover && raw.length > 3 && hover.includes(lower)));
+  });
+}
+
+function updateSelectedSentenceFlags(layer: HTMLElement, selectedSentenceIds: string[]) {
+  layer.querySelectorAll(".sentence-selected").forEach((node) => {
+    node.classList.remove("sentence-selected");
+  });
+  if (selectedSentenceIds.length === 0) {
+    return;
+  }
+  const selectedIds = new Set(selectedSentenceIds);
+  layer.querySelectorAll<HTMLElement>("[data-sentence-id]").forEach((node) => {
+    if (node.dataset.sentenceId && selectedIds.has(node.dataset.sentenceId)) {
+      node.classList.add("sentence-selected");
+    }
+  });
+}
+
 export function PdfPageView(props: PdfPageViewProps) {
   const ui = useUiStrings();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
   const wordClickStartRef = useRef<{ x: number; y: number } | null>(null);
+  const latestSearchTermRef = useRef(props.searchTerm);
+  const latestHoverSourceRef = useRef(props.hoverSource);
+  const latestSelectedSentenceIdsRef = useRef(props.selectedSentenceIds);
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
   const [derivedRects, setDerivedRects] = useState<Record<string, HighlightRect[]>>({});
   const [linkTargets, setLinkTargets] = useState<PdfLinkPreviewTarget[]>([]);
@@ -203,7 +232,6 @@ export function PdfPageView(props: PdfPageViewProps) {
       layer.style.width = `${viewport.width}px`;
       layer.style.height = `${viewport.height}px`;
       const bounds = sentenceBounds(text, props.sentenceUnits);
-      const selectedIds = new Set(props.selectedSentenceIds);
       let textCursor = 0;
       const textBoxes: TextLayerBox[] = [];
       for (const sourceBox of extractedTextLayer.boxes) {
@@ -228,18 +256,6 @@ export function PdfPageView(props: PdfPageViewProps) {
         if (sentence) {
           span.dataset.sentenceId = sentence.id;
           span.classList.add("sentence-token");
-          if (selectedIds.has(sentence.id)) {
-            span.classList.add("sentence-selected");
-          }
-        }
-        const searchHit =
-          props.searchTerm.trim().length > 1 && raw.toLowerCase().includes(props.searchTerm.trim().toLowerCase());
-        const hoverHit = props.hoverSource && props.hoverSource.toLowerCase().includes(raw.toLowerCase()) && raw.length > 3;
-        if (searchHit) {
-          span.classList.add("search-hit");
-        }
-        if (hoverHit) {
-          span.classList.add("hover-hit");
         }
         layer.appendChild(span);
         const targetWidth = sourceBox.rect.width;
@@ -264,6 +280,8 @@ export function PdfPageView(props: PdfPageViewProps) {
       }
       const detectedAnchors = detectedOutlineAnchorsForPage(props.pageNumber, textBoxes, viewport.width, viewport.height);
       annotateHyphenatedTextSpans(layer);
+      updateSelectedSentenceFlags(layer, latestSelectedSentenceIdsRef.current);
+      updateTextSpanFlags(layer, latestSearchTermRef.current, latestHoverSourceRef.current);
       props.onOutlineReady(props.pageNumber, detectedAnchors);
       setOutlineAnchors(detectedAnchors);
       setTextLayerMetrics({ text, boxes: textBoxes });
@@ -279,8 +297,6 @@ export function PdfPageView(props: PdfPageViewProps) {
     props.pageNumber,
     props.zoom,
     props.textLayoutMode,
-    props.searchTerm,
-    props.hoverSource,
     sentenceKey,
   ]);
 
@@ -289,19 +305,19 @@ export function PdfPageView(props: PdfPageViewProps) {
     if (!layer) {
       return;
     }
-    layer.querySelectorAll(".sentence-selected").forEach((node) => {
-      node.classList.remove("sentence-selected");
-    });
-    if (props.selectedSentenceIds.length === 0) {
+    latestSelectedSentenceIdsRef.current = props.selectedSentenceIds;
+    updateSelectedSentenceFlags(layer, props.selectedSentenceIds);
+  }, [selectedSentenceKey, textLayerMetrics.text]);
+
+  useEffect(() => {
+    const layer = textLayerRef.current;
+    if (!layer) {
       return;
     }
-    const selectedIds = new Set(props.selectedSentenceIds);
-    layer.querySelectorAll<HTMLElement>("[data-sentence-id]").forEach((node) => {
-      if (node.dataset.sentenceId && selectedIds.has(node.dataset.sentenceId)) {
-        node.classList.add("sentence-selected");
-      }
-    });
-  }, [selectedSentenceKey]);
+    latestSearchTermRef.current = props.searchTerm;
+    latestHoverSourceRef.current = props.hoverSource;
+    updateTextSpanFlags(layer, props.searchTerm, props.hoverSource);
+  }, [props.searchTerm, props.hoverSource, textLayerMetrics.text]);
 
   const explanationMarkers = props.annotations
     .filter(isExplanationAnnotation)

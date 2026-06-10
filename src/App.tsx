@@ -205,6 +205,7 @@ function App() {
   const [pageOutlineAnchors, setPageOutlineAnchors] = useState<Record<number, OutlineAnchor[]>>({});
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const stateRef = useRef(state);
   const readerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -213,6 +214,10 @@ function App() {
   const incompleteTranslationRetriesRef = useRef<Map<string, number>>(new Map());
   const outlineRequestsRef = useRef<Set<string>>(new Set());
   const documentLayoutRequestsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const patchState = useCallback((mutator: (draft: AppStateRecord) => void) => {
     setState((current) => {
@@ -373,6 +378,30 @@ function App() {
     showToast,
   });
 
+  function shouldPersistPageTextLayout(
+    settings: AppStateRecord["settings"],
+    documentId: string,
+    pageNumber: number,
+    inference: PageTextLayoutInference,
+    source: "local" | "ai",
+  ) {
+    const layoutKey = pageTextLayoutSettingKey(documentId, pageNumber);
+    const confidenceKey = pageTextLayoutConfidenceSettingKey(documentId, pageNumber);
+    const sourceKey = pageTextLayoutSourceSettingKey(documentId, pageNumber);
+    const existingSource = settings[sourceKey] || "";
+    const existingConfidence = Number(settings[confidenceKey] || "0");
+    const nextConfidence = Math.max(0, Math.min(1, inference.confidence));
+    if (existingSource === "ai" && source !== "ai") {
+      return false;
+    }
+    return !(
+      settings[layoutKey] === inference.mode &&
+      existingSource === source &&
+      Number.isFinite(existingConfidence) &&
+      existingConfidence >= nextConfidence
+    );
+  }
+
   async function persistPageTextLayoutInference(
     documentId: string,
     pageNumber: number,
@@ -383,10 +412,31 @@ function App() {
     const confidenceKey = pageTextLayoutConfidenceSettingKey(documentId, pageNumber);
     const sourceKey = pageTextLayoutSourceSettingKey(documentId, pageNumber);
     const confidence = String(Math.max(0, Math.min(1, inference.confidence)));
-    patchState((draft) => {
-      draft.settings[layoutKey] = inference.mode;
-      draft.settings[confidenceKey] = confidence;
-      draft.settings[sourceKey] = source;
+    if (!shouldPersistPageTextLayout(stateRef.current.settings, documentId, pageNumber, inference, source)) {
+      return;
+    }
+    stateRef.current = {
+      ...stateRef.current,
+      settings: {
+        ...stateRef.current.settings,
+        [layoutKey]: inference.mode,
+        [confidenceKey]: confidence,
+        [sourceKey]: source,
+      },
+    };
+    setState((current) => {
+      if (!shouldPersistPageTextLayout(current.settings, documentId, pageNumber, inference, source)) {
+        return current;
+      }
+      return {
+        ...current,
+        settings: {
+          ...current.settings,
+          [layoutKey]: inference.mode,
+          [confidenceKey]: confidence,
+          [sourceKey]: source,
+        },
+      };
     });
     await Promise.all([
       setSetting(layoutKey, inference.mode),
@@ -396,15 +446,7 @@ function App() {
   }
 
   function rememberPageTextLayout(documentId: string, pageNumber: number, inference: PageTextLayoutInference) {
-    const layoutKey = pageTextLayoutSettingKey(documentId, pageNumber);
-    const confidenceKey = pageTextLayoutConfidenceSettingKey(documentId, pageNumber);
-    const sourceKey = pageTextLayoutSourceSettingKey(documentId, pageNumber);
-    const existingSource = state.settings[sourceKey] || "";
-    const existingConfidence = Number(state.settings[confidenceKey] || "0");
-    if (existingSource === "ai") {
-      return;
-    }
-    if (state.settings[layoutKey] === inference.mode && Number.isFinite(existingConfidence) && existingConfidence >= inference.confidence) {
+    if (!shouldPersistPageTextLayout(stateRef.current.settings, documentId, pageNumber, inference, "local")) {
       return;
     }
     void persistPageTextLayoutInference(documentId, pageNumber, inference).catch((error) =>

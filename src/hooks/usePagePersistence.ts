@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { AiResultRecord, AiTaskType, AnnotationRecord, AppStateRecord, DocumentRecord, PageRecord } from "../types";
 import { createAutoHighlights } from "../lib/highlights";
 import { annotationKey } from "../lib/annotationHelpers";
@@ -35,6 +35,14 @@ type PagePersistenceInput = {
   queueTask: QueueTask;
 };
 
+function pageTextCacheKey(page: PageRecord) {
+  return `${page.documentId}:${page.pageNumber}`;
+}
+
+function pageTextCacheValue(page: PageRecord) {
+  return `${page.text}\u0000${page.outlineLabel}`;
+}
+
 export function usePagePersistence(input: PagePersistenceInput) {
   const {
     state,
@@ -56,7 +64,19 @@ export function usePagePersistence(input: PagePersistenceInput) {
     ensureActivePages,
     queueTask,
   } = input;
+  const pageTextCacheRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    pageTextCacheRef.current = new Map(activePages.map((page) => [pageTextCacheKey(page), pageTextCacheValue(page)]));
+  }, [activePages]);
+
   async function createPageText(page: PageRecord) {
+    const cacheKey = pageTextCacheKey(page);
+    const cacheValue = pageTextCacheValue(page);
+    if (pageTextCacheRef.current.get(cacheKey) === cacheValue) {
+      return;
+    }
+    pageTextCacheRef.current.set(cacheKey, cacheValue);
     setState((current) => {
       const existing = current.pages.find(
         (item) => item.documentId === page.documentId && item.pageNumber === page.pageNumber,
