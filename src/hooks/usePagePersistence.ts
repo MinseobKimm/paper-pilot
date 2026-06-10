@@ -68,11 +68,10 @@ export function usePagePersistence(input: PagePersistenceInput) {
       ) {
         return current;
       }
-      const draft = structuredClone(current) as AppStateRecord;
-      draft.pages = draft.pages
+      const pages = current.pages
         .filter((item) => !(item.documentId === page.documentId && item.pageNumber === page.pageNumber))
         .concat(page);
-      return draft;
+      return { ...current, pages };
     });
     if (state.settings.autoTranslate === "true" && translationEligiblePages.has(page.pageNumber)) {
       void queueTranslationForPage(page, { silent: true });

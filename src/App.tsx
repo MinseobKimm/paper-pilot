@@ -222,6 +222,39 @@ function App() {
     });
   }, []);
 
+  const upsertAiResultInState = useCallback((result: AiResultRecord, removeIds: string[] = []) => {
+    setState((current) => {
+      const remove = new Set([result.id, ...removeIds].filter(Boolean));
+      const aiResults = [result, ...current.aiResults.filter((item) => !remove.has(item.id))];
+      return { ...current, aiResults };
+    });
+  }, []);
+
+  const updateAiResultInState = useCallback((id: string, updater: (result: AiResultRecord) => AiResultRecord) => {
+    setState((current) => {
+      let changed = false;
+      const aiResults = current.aiResults.map((item) => {
+        if (item.id !== id) {
+          return item;
+        }
+        changed = true;
+        return updater(item);
+      });
+      return changed ? { ...current, aiResults } : current;
+    });
+  }, []);
+
+  const removeAiResultsFromState = useCallback((ids: string[]) => {
+    if (ids.length === 0) {
+      return;
+    }
+    setState((current) => {
+      const remove = new Set(ids);
+      const aiResults = current.aiResults.filter((item) => !remove.has(item.id));
+      return aiResults.length === current.aiResults.length ? current : { ...current, aiResults };
+    });
+  }, []);
+
   const showToast = useCallback((message: string, kind: ToastMessage["kind"] = "info") => {
     if (toastTimerRef.current !== null) {
       window.clearTimeout(toastTimerRef.current);
@@ -514,8 +547,9 @@ function App() {
 
   async function replaceExtractedPages(documentId: string, pages: PageRecord[]) {
     await savePages(documentId, pages);
-    patchState((draft) => {
-      draft.pages = draft.pages.filter((page) => page.documentId !== documentId).concat(pages);
+    setState((current) => {
+      const nextPages = current.pages.filter((page) => page.documentId !== documentId).concat(pages);
+      return { ...current, pages: nextPages };
     });
     void persistWordListForPages(documentId, pages).catch((error) =>
       showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"),
@@ -561,21 +595,16 @@ function App() {
       const requestedAskMode = typeof payload.askMode === "string" ? payload.askMode : "auto";
       const askMode = requestedAskMode === "direct" ? "deep" : requestedAskMode;
       const question = typeof payload.question === "string" ? payload.question.trim() : "";
-      patchState((draft) => {
-        draft.aiResults = [
-          {
-            id: optimisticChatId,
-            documentId: activeDocument.id,
-            taskType,
-            inputText: chatInputTextWithMode(question, askMode),
-            outputText: "",
-            status: "pending",
-            createdAt: nowIso(),
-            provider: providerKind,
-            model: selectedAiModelForRun(state.settings),
-          },
-          ...draft.aiResults.filter((item) => item.id !== optimisticChatId),
-        ];
+      upsertAiResultInState({
+        id: optimisticChatId,
+        documentId: activeDocument.id,
+        taskType,
+        inputText: chatInputTextWithMode(question, askMode),
+        outputText: "",
+        status: "pending",
+        createdAt: nowIso(),
+        provider: providerKind,
+        model: selectedAiModelForRun(state.settings),
       });
       setAssistantMode("study");
       if (!options.keepPanel) {
@@ -623,9 +652,7 @@ function App() {
         reasoningEffort: providerKind === "codex-cli" ? selectedCodexReasoningEffort(state.settings) : "",
         providerSessionId,
       });
-      patchState((draft) => {
-        draft.aiResults = [queued, ...draft.aiResults.filter((item) => item.id !== queued.id && item.id !== optimisticChatId)];
-      });
+      upsertAiResultInState(queued, optimisticChatId ? [optimisticChatId] : []);
       setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
       if (taskType === "explainText" || taskType === "explainRegionImage") {
         setFloatingResultId(queued.id);
@@ -658,17 +685,11 @@ function App() {
       return queued;
     } catch (error) {
       if (optimisticChatId) {
-        patchState((draft) => {
-          draft.aiResults = draft.aiResults.map((item) =>
-            item.id === optimisticChatId
-              ? {
-                  ...item,
-                  outputText: String(error),
-                  status: "failed",
-                }
-              : item,
-          );
-        });
+        updateAiResultInState(optimisticChatId, (item) => ({
+          ...item,
+          outputText: String(error),
+          status: "failed",
+        }));
       }
       if (!options.silent) {
         showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error");
@@ -731,10 +752,7 @@ function App() {
       return;
     }
     await deleteAiResults(existingIds);
-    const idSet = new Set(existingIds);
-    patchState((draft) => {
-      draft.aiResults = draft.aiResults.filter((result) => !idSet.has(result.id));
-    });
+    removeAiResultsFromState(existingIds);
   }
 
   const {
@@ -1059,6 +1077,7 @@ function App() {
     ui,
     uiLanguage,
     patchState,
+    upsertAiResultInState,
     showToast,
     translationRequestsRef,
     setFloatingResultId,
@@ -1067,27 +1086,53 @@ function App() {
     onFastEvidenceInsufficient: queueDeepReadAfterInsufficientFast,
   });
 
-  function scrollPdfSentenceIntoView(id: string) {
+  function sentencePageFromId(id: string) {
+    return Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
+  }
+
+  function sourceSentenceIdsForSelection(id: string) {
+    const unit = currentTranslationUnits.find(
+      (item) => item.id === id || (item.sourceIds ?? []).includes(id),
+    );
+    return unit?.sourceIds?.length ? unit.sourceIds : [id];
+  }
+
+  function scrollPdfSentenceIntoView(ids: string[], attempt = 0) {
+    const sentenceIds = ids.filter(Boolean);
+    if (sentenceIds.length === 0) {
+      return;
+    }
+    const page = sentenceIds.map(sentencePageFromId).find((value) => value > 0) ?? 0;
     window.setTimeout(() => {
-      const target = Array.from(document.querySelectorAll<HTMLElement>(".text-layer [data-sentence-id]")).find(
-        (node) => node.dataset.sentenceId === id,
-      );
-      target?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    }, 80);
+      const targets = Array.from(document.querySelectorAll<HTMLElement>(".text-layer [data-sentence-id]"));
+      const target = targets.find((node) => node.dataset.sentenceId && sentenceIds.includes(node.dataset.sentenceId));
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        return;
+      }
+      if (attempt < 14) {
+        scrollPdfSentenceIntoView(sentenceIds, attempt + 1);
+        return;
+      }
+      const pageShell = page > 0 ? document.getElementById(`page-${page}`) : null;
+      pageShell?.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+    }, attempt === 0 ? 80 : 120);
   }
 
   function selectSentenceAndScroll(id: string) {
     setSelectedSentenceId(id);
-    const page = Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
+    const sourceIds = sourceSentenceIdsForSelection(id);
+    const page = sourceIds.map(sentencePageFromId).find((value) => value > 0) ?? sentencePageFromId(id);
     if (page > 0 && page !== pageCursor) {
-      setPageCursor(page);
+      goToPage(page);
     }
-    scrollPdfSentenceIntoView(id);
+    scrollPdfSentenceIntoView(sourceIds);
   }
 
   function focusTranslationSentence(id: string) {
     setSelectedSentenceId(id);
-    const page = Number(id.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
+    const sourceIds = sourceSentenceIdsForSelection(id);
+    const page = sourceIds.map(sentencePageFromId).find((value) => value > 0) ?? sentencePageFromId(id);
     if (page > 0 && page !== pageCursor) {
       setPageCursor(page);
     }

@@ -22,6 +22,7 @@ type BridgeResultsInput = {
   ui: UiStrings;
   uiLanguage: UiLanguage;
   patchState: PatchState;
+  upsertAiResultInState: (result: AiResultRecord) => void;
   showToast: (message: string, kind?: "info" | "error") => void;
   translationRequestsRef: { current: Map<string, number> };
   setFloatingResultId: (id: string | null) => void;
@@ -48,6 +49,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
     ui,
     uiLanguage,
     patchState,
+    upsertAiResultInState,
     showToast,
     translationRequestsRef,
     setFloatingResultId,
@@ -57,9 +59,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
   } = input;
   async function saveLocalAiResult(result: AiResultRecord) {
     const saved = await saveAiResult(result);
-    patchState((draft) => {
-      draft.aiResults = [saved, ...draft.aiResults.filter((item) => item.id !== saved.id)];
-    });
+    upsertAiResultInState(saved);
     return saved;
   }
 

@@ -24,7 +24,7 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
   );
   const activePages = useMemo(
     () => (activeDocument ? documentPages(input.state, activeDocument.id) : []),
-    [activeDocument, input.state],
+    [activeDocument, input.state.pages],
   );
   const activePageNumbers = useMemo(
     () =>
@@ -101,7 +101,7 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
   );
   const activeNote = useMemo(
     () => (activeDocument ? currentNote(input.state, activeDocument.id) : null),
-    [activeDocument, input.state],
+    [activeDocument, input.state.notes],
   );
   const floatingResult = useMemo(
     () => activeAiResults.find((result) => result.id === input.floatingResultId) ?? null,
