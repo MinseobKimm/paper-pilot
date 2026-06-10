@@ -38,6 +38,17 @@ function savedChatAskMode(taskType: string, value: unknown) {
   return value === "fast" || value === "deep" || value === "auto" ? value : "";
 }
 
+function aiResultContentMatches(left: AiResultRecord, right: AiResultRecord) {
+  return (
+    left.inputText === right.inputText &&
+    left.outputText === right.outputText &&
+    left.status === right.status &&
+    left.provider === right.provider &&
+    left.model === right.model &&
+    left.providerSessionId === right.providerSessionId
+  );
+}
+
 export function useBridgeResults(input: BridgeResultsInput) {
   const {
     activeDocument,
@@ -116,7 +127,6 @@ export function useBridgeResults(input: BridgeResultsInput) {
     for (const item of pending) {
       const bridgeResult = await readBridgeResult(bridgePath, item.id);
       if (bridgeResult) {
-        received += 1;
         const metadata = bridgeResult.payload as Record<string, unknown>;
         const nestedPayload =
           metadata.payload && typeof metadata.payload === "object"
@@ -145,7 +155,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
         const plannedAskMode =
           savedChatAskMode(item.taskType.toString(), nestedPayload.askMode) ||
           savedChatAskMode(item.taskType.toString(), metadata.askMode);
-        const savedResult = await saveLocalAiResult({
+        const nextResult: AiResultRecord = {
           ...item,
           inputText: plannedAskMode ? chatInputTextWithMode(item.inputText, plannedAskMode) : item.inputText,
           outputText: prependTokenEstimate(outputText, {
@@ -156,7 +166,12 @@ export function useBridgeResults(input: BridgeResultsInput) {
           provider,
           model,
           providerSessionId,
-        });
+        };
+        if (bridgeResult.status === "pending" && aiResultContentMatches(item, nextResult)) {
+          continue;
+        }
+        received += 1;
+        const savedResult = await saveLocalAiResult(nextResult);
         if (item.taskType.toString() === "translatePage") {
           const page = activePages.find((candidate) => normalizeComparable(candidate.text) === normalizeComparable(translationInputText(item)));
           if (page) {
