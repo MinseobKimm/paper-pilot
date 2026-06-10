@@ -328,6 +328,12 @@ function App() {
     state.settings.readerTranslationPanelOpen,
   ]);
 
+  useEffect(() => {
+    if (!translationPanelOpen) {
+      setSelectedSentenceId(null);
+    }
+  }, [translationPanelOpen]);
+
   const upsertAiResultInState = useCallback((result: AiResultRecord, removeIds: string[] = []) => {
     setState((current) => {
       const remove = new Set([result.id, ...removeIds].filter(Boolean));
