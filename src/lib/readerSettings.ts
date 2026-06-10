@@ -11,7 +11,7 @@ export const pageTextLayoutAiVersion = "page-text-layout-v1";
 
 export const defaultReaderZoom = 1.05;
 export const minReaderZoom = 0.55;
-export const maxReaderZoom = 2.5;
+export const maxReaderZoom = Number.POSITIVE_INFINITY;
 export const nextPageTranslationReadProgress = 0.82;
 export const readerOutlineOpenSettingKey = "readerOutlineOpen";
 export const readerOutlineCompactSettingKey = "readerOutlineCompact";
