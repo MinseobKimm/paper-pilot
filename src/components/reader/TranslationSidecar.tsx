@@ -1,17 +1,14 @@
 import { useEffect, useRef, type PointerEvent } from "react";
 import { RefreshCw, Sparkles, X } from "../icons";
 import { InlineMathText } from "../FormattedAiText";
-import type { TranslationUnit } from "../../lib/translations";
+import { smartSentenceParts, type TranslationUnit } from "../../lib/translations";
 import type { UiStrings } from "../../lib/uiStrings";
 function readableTranslationLines(text: string) {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized) {
     return [""];
   }
-  const chunks = normalized
-    .split(/(?<=[.!?])\s+/)
-    .map((chunk) => chunk.trim())
-    .filter(Boolean);
+  const chunks = smartSentenceParts(normalized);
   const lines: string[] = [];
   let line = "";
   const flush = () => {

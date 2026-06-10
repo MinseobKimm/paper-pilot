@@ -95,13 +95,6 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
   }, [activeDocumentId]);
 
   useEffect(() => {
-    setSelectedSentenceId((current) => {
-      const selectedPage = Number(current?.match(/^p(\d+)-(?:s|ai)\d+$/)?.[1] ?? 0);
-      return selectedPage === pageCursor ? current : null;
-    });
-  }, [pageCursor]);
-
-  useEffect(() => {
     if (state.settings.autoTranslate !== "true" || !activeDocument || !pdfDocument) {
       return;
     }

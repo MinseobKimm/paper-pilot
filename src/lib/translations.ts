@@ -1,3 +1,4 @@
+import sentenceTokenizer from "sbd";
 import type { AiResultRecord, PageRecord } from "../types";
 import { cleanAiOutput, normalizeComparable, normalizeForMatch, parseAiJson, stripJsonFence } from "./textUtils";
 import { uiStrings, type UiStrings } from "./uiStrings";
@@ -25,164 +26,19 @@ export type TranslationUnit = SentenceUnit & {
 
 export const stalePendingTranslationMs = 20 * 60 * 1000;
 
-export function sentenceParts(text: string): string[] {
-  return (text || "")
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 1);
-}
-
-
-const nonTerminalPeriodWords = new Set([
-  "al",
-  "approx",
-  "cf",
-  "col",
-  "dr",
-  "eq",
-  "eqs",
-  "fig",
-  "figs",
-  "inc",
-  "jr",
-  "mr",
-  "mrs",
-  "ms",
-  "no",
-  "nos",
-  "prof",
-  "ref",
-  "refs",
-  "sec",
-  "secs",
-  "sr",
-  "st",
-  "vs",
-]);
-
-const conditionalPeriodWords = new Set(["etc"]);
-
-function isAsciiLetter(value: string) {
-  return /^[A-Za-z]$/.test(value);
-}
-
-function isSentenceTerminator(value: string) {
-  return value === "." || value === "!" || value === "?";
-}
-
-function isSentenceCloser(value: string) {
-  return /^[)"'\]}]$/.test(value);
-}
-
-function nextNonSpaceIndex(text: string, index: number) {
-  let cursor = index;
-  while (cursor < text.length && /\s/.test(text[cursor])) {
-    cursor += 1;
-  }
-  return cursor;
-}
-
-function previousPeriodWord(text: string, periodIndex: number) {
-  let cursor = periodIndex - 1;
-  while (cursor >= 0 && isAsciiLetter(text[cursor])) {
-    cursor -= 1;
-  }
-  return text.slice(cursor + 1, periodIndex).toLowerCase();
-}
-
-function fragmentWordCount(fragment: string) {
-  return fragment.match(/[A-Za-z0-9]+/g)?.length ?? 0;
-}
-
-function isCaptionOrNumberLabel(fragment: string) {
-  if (/^\d{1,3}(?:\.\d{1,3})*\.$/.test(fragment)) {
-    return true;
-  }
-  return /(?:^|\s)(?:fig|figure|table|algorithm|alg|scheme|chart|appendix|section|sec|eq|equation)\.?\s*[A-Za-z]?\d+(?:\.\d+)*[a-z]?\.$/i.test(
-    fragment,
-  );
-}
-
-function isNonTerminalPeriod(text: string, periodIndex: number, sentenceStart: number, tokenEnd: number) {
-  const previous = text[periodIndex - 1] ?? "";
-  const next = text[periodIndex + 1] ?? "";
-  if (/\d/.test(previous) && /\d/.test(next)) {
-    return true;
-  }
-
-  const fragment = text.slice(sentenceStart, periodIndex + 1).trim();
-  if (isCaptionOrNumberLabel(fragment) && fragmentWordCount(fragment) <= 4) {
-    return true;
-  }
-
-  const beforePeriod = text.slice(Math.max(sentenceStart, periodIndex - 24), periodIndex + 1);
-  if (/(?:\b[A-Za-z]\.){2,}$/.test(beforePeriod)) {
-    return true;
-  }
-
-  const word = previousPeriodWord(text, periodIndex);
-  const nextIndex = nextNonSpaceIndex(text, tokenEnd);
-  const nextChar = text[nextIndex] ?? "";
-  if (nonTerminalPeriodWords.has(word)) {
-    return true;
-  }
-  if (conditionalPeriodWords.has(word) && nextChar && !/[A-Z]/.test(nextChar)) {
-    return true;
-  }
-  if (word.length === 1 && /^[A-Za-z]$/.test(word)) {
-    return true;
-  }
-  if (nextChar && /^[a-z]$/.test(nextChar)) {
-    return true;
-  }
-  return false;
-}
-
-function isSmartSentenceBoundary(text: string, terminatorIndex: number, sentenceStart: number, tokenEnd: number) {
-  if (tokenEnd < text.length && !/\s/.test(text[tokenEnd])) {
-    return false;
-  }
-  const terminator = text[terminatorIndex];
-  if (terminator === "." && isNonTerminalPeriod(text, terminatorIndex, sentenceStart, tokenEnd)) {
-    return false;
-  }
-  return true;
-}
-
 export function smartSentenceParts(text: string): string[] {
   const normalized = (text || "").replace(/\s+/g, " ").trim();
   if (!normalized) {
     return [];
   }
-  const parts: string[] = [];
-  let start = 0;
-  let index = 0;
-  while (index < normalized.length) {
-    if (!isSentenceTerminator(normalized[index])) {
-      index += 1;
-      continue;
-    }
-    let tokenEnd = index + 1;
-    while (tokenEnd < normalized.length && isSentenceCloser(normalized[tokenEnd])) {
-      tokenEnd += 1;
-    }
-    if (isSmartSentenceBoundary(normalized, index, start, tokenEnd)) {
-      const sentence = normalized.slice(start, tokenEnd).trim();
-      if (sentence.length > 1) {
-        parts.push(sentence);
-      }
-      start = nextNonSpaceIndex(normalized, tokenEnd);
-      index = start;
-      continue;
-    }
-    index += 1;
-  }
-  const tail = normalized.slice(start).trim();
-  if (tail.length > 1) {
-    parts.push(tail);
-  }
-  return parts;
+  return sentenceTokenizer
+    .sentences(normalized, { sanitize: false, preserve_whitespace: false })
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter((item) => item.length > 1);
+}
+
+export function sentenceParts(text: string): string[] {
+  return smartSentenceParts(text);
 }
 
 export function sentenceUnitsForPage(page: PageRecord | undefined): SentenceUnit[] {
