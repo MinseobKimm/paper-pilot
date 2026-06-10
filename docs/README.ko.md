@@ -149,28 +149,6 @@ Paper Pilot의 Settings에서 provider를 선택합니다.
 | Codex CLI | Codex CLI를 설치하고 `codex`가 `PATH`에 잡히게 하거나 `CODEX_BIN`을 지정합니다. |
 | Claude Code | Claude Code를 설치하고 `claude`가 `PATH`에 잡히게 하거나 `CLAUDE_CODE_BIN`을 지정합니다. |
 
-기본 bridge folder:
-
-```text
-bridge/
-  outbox/     task JSON files
-  inbox/      result JSON files
-  logs/       worker logs
-```
-
-## Repository Layout
-
-```text
-paper-pilot/
-  src/                 React UI and reading workflow
-  src/lib/             AI bridge, translation, citations, scholarly lookup
-  src-tauri/           Tauri backend, SQLite, worker commands
-  retrieval-adapter/   Fast Q&A retrieval bridge
-  docs/                Korean README and product screenshots
-```
-
-`bridge/`, `dist/`, release artifacts, QA captures, local PDFs, agent outputs는 실행 중 생기는 로컬 파일입니다. 저장소에는 올리지 않도록 제외했습니다.
-
 ## Third-party Attribution
 
 Paper Pilot은 third-party 프로젝트를 의존성으로 통합하며, 각 프로젝트의 라이선스는 이 저장소의 소스 라이선스와 별도로 유지됩니다.
@@ -185,14 +163,3 @@ Paper Pilot은 PaperQA2 소스 코드를 vendoring하지 않습니다. 로컬 re
 Paper Pilot은 [Apache License 2.0](../LICENSE)으로 공개됩니다.
 
 이 라이선스는 이 저장소의 소스 코드에 적용됩니다. Paper Pilot에서 사용하는 third-party libraries, AI providers, model outputs, 사용자가 여는 논문과 PDF는 각각의 라이선스와 이용약관을 따릅니다.
-
-## 기여
-
-Pull request를 환영합니다. Reader polish, provider adapter, citation workflow, installer, export format, library ergonomics 개선은 특히 좋은 기여 영역입니다.
-
-PR을 열기 전:
-
-```bash
-npm test
-npm run desktop:check
-```

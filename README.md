@@ -147,28 +147,6 @@ Open Settings in Paper Pilot and choose a provider.
 | Codex CLI | Install Codex CLI and make sure `codex` is on `PATH`, or set `CODEX_BIN`. |
 | Claude Code | Install Claude Code and make sure `claude` is on `PATH`, or set `CLAUDE_CODE_BIN`. |
 
-The bridge folder defaults to:
-
-```text
-bridge/
-  outbox/     task JSON files
-  inbox/      result JSON files
-  logs/       worker logs
-```
-
-## Repository Layout
-
-```text
-paper-pilot/
-  src/                 React UI and reading workflow
-  src/lib/             AI bridge, translation, citations, scholarly lookup
-  src-tauri/           Tauri backend, SQLite, worker commands
-  retrieval-adapter/   Fast Q&A retrieval bridge
-  docs/                Korean README and product screenshots
-```
-
-`bridge/`, `dist/`, release artifacts, QA captures, local PDFs, and agent outputs are runtime files. They are created locally and kept out of the repository.
-
 ## Third-party Attribution
 
 Paper Pilot integrates third-party projects as dependencies and keeps their licenses separate from this repository's source license.
@@ -183,14 +161,3 @@ Paper Pilot does not vendor PaperQA2 source code. It calls the installed Python 
 Paper Pilot is released under the [Apache License 2.0](LICENSE).
 
 This license applies to the source code in this repository. Third-party libraries, AI providers, model outputs, and papers opened with Paper Pilot remain governed by their own licenses and terms.
-
-## Contributing
-
-Pull requests are welcome. Useful areas include reader polish, provider adapters, citation workflows, installers, export formats, and library ergonomics.
-
-Before opening a PR:
-
-```bash
-npm test
-npm run desktop:check
-```
