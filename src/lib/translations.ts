@@ -26,13 +26,41 @@ export type TranslationUnit = SentenceUnit & {
 
 export const stalePendingTranslationMs = 20 * 60 * 1000;
 
+const structuralHeadingPattern =
+  /\b(?:Abstract|\d+(?:\.\d+)*\.?\s+(?:Introduction|Background|Related Work|Preliminaries|Method|Methods|Approach|Experiments|Evaluation|Results|Discussion|Conclusion|Limitations|References|Appendix|Acknowledgements?))\b/g;
+const structuralHeadingExactPattern =
+  /^(?:Abstract|\d+(?:\.\d+)*\.?\s+(?:Introduction|Background|Related Work|Preliminaries|Method|Methods|Approach|Experiments|Evaluation|Results|Discussion|Conclusion|Limitations|References|Appendix|Acknowledgements?))$/;
+
+function structuralSentenceChunks(text: string) {
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(structuralHeadingPattern)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (start > cursor) {
+      chunks.push(text.slice(cursor, start).trim());
+    }
+    chunks.push(match[0].trim());
+    cursor = end;
+  }
+  if (cursor < text.length) {
+    chunks.push(text.slice(cursor).trim());
+  }
+  return chunks.filter(Boolean);
+}
+
 export function smartSentenceParts(text: string): string[] {
   const normalized = (text || "").replace(/\s+/g, " ").trim();
   if (!normalized) {
     return [];
   }
-  return sentenceTokenizer
-    .sentences(normalized, { sanitize: false, preserve_whitespace: false })
+  return structuralSentenceChunks(normalized)
+    .flatMap((chunk) => {
+      if (structuralHeadingExactPattern.test(chunk)) {
+        return [chunk];
+      }
+      return sentenceTokenizer.sentences(chunk, { sanitize: false, preserve_whitespace: false });
+    })
     .map((item) => item.replace(/\s+/g, " ").trim())
     .filter((item) => item.length > 1);
 }
@@ -528,13 +556,106 @@ export function autoHighlightRequestKey(documentId: string, pageNumber: number, 
   return `${documentId}:${pageNumber}:${normalizeComparable(text).slice(0, 160)}`;
 }
 
+function isAsciiLetter(value: string | undefined) {
+  return Boolean(value && /[A-Za-z]/.test(value));
+}
+
+function nonWhitespaceBefore(value: string, index: number) {
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    const char = value[cursor];
+    if (char && !/\s/.test(char)) {
+      return char;
+    }
+  }
+  return "";
+}
+
+function nonWhitespaceAfter(value: string, index: number) {
+  for (let cursor = index; cursor < value.length; cursor += 1) {
+    const char = value[cursor];
+    if (char && !/\s/.test(char)) {
+      return char;
+    }
+  }
+  return "";
+}
+
+function isSoftLineHyphen(value: string, index: number) {
+  return (
+    value[index] === "-" &&
+    /\s/.test(value[index + 1] ?? "") &&
+    isAsciiLetter(nonWhitespaceBefore(value, index - 1)) &&
+    isAsciiLetter(nonWhitespaceAfter(value, index + 1))
+  );
+}
+
+function indexedSentenceSearchText(value: string) {
+  let text = "";
+  const indices: number[] = [];
+  let pendingSpaceIndex: number | null = null;
+  const pushPendingSpace = () => {
+    if (pendingSpaceIndex !== null && text.length > 0 && !text.endsWith(" ")) {
+      text += " ";
+      indices.push(pendingSpaceIndex);
+    }
+    pendingSpaceIndex = null;
+  };
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\u00ad") {
+      continue;
+    }
+    if (isSoftLineHyphen(value, index)) {
+      pendingSpaceIndex = null;
+      while (index + 1 < value.length && /\s/.test(value[index + 1])) {
+        index += 1;
+      }
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (text.length > 0 && pendingSpaceIndex === null) {
+        pendingSpaceIndex = index;
+      }
+      continue;
+    }
+    pushPendingSpace();
+    text += char.toLowerCase();
+    indices.push(index);
+  }
+  return { text, indices };
+}
+
+function normalizedCursorForOriginalIndex(indices: number[], originalIndex: number) {
+  const cursor = indices.findIndex((index) => index >= originalIndex);
+  return cursor >= 0 ? cursor : indices.length;
+}
+
 export function sentenceBounds(text: string, units: SentenceUnit[]) {
-  let cursor = 0;
+  const searchTarget = indexedSentenceSearchText(text);
+  let normalizedCursor = 0;
+  let rawCursor = 0;
   return units.map((unit) => {
-    const index = text.indexOf(unit.source, cursor);
-    const start = index >= 0 ? index : cursor;
-    const end = start + unit.source.length;
-    cursor = end;
-    return { id: unit.id, start, end };
+    const searchUnit = indexedSentenceSearchText(unit.source);
+    if (searchUnit.text) {
+      const normalizedIndex = searchTarget.text.indexOf(searchUnit.text, normalizedCursor);
+      if (normalizedIndex >= 0) {
+        const start = searchTarget.indices[normalizedIndex] ?? rawCursor;
+        const lastIndex = searchTarget.indices[normalizedIndex + searchUnit.text.length - 1] ?? start;
+        const end = Math.max(start, lastIndex + 1);
+        normalizedCursor = normalizedIndex + searchUnit.text.length;
+        rawCursor = end;
+        return { id: unit.id, start, end };
+      }
+    }
+    const exactIndex = text.indexOf(unit.source, rawCursor);
+    if (exactIndex >= 0) {
+      const start = exactIndex;
+      const end = start + unit.source.length;
+      rawCursor = end;
+      normalizedCursor = normalizedCursorForOriginalIndex(searchTarget.indices, end);
+      return { id: unit.id, start, end };
+    }
+    const cursor = Math.min(rawCursor, text.length);
+    return { id: unit.id, start: cursor, end: cursor };
   });
 }

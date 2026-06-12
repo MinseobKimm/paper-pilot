@@ -198,21 +198,67 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
   }
 
   function pageAtReaderMarker(element: HTMLElement) {
+    return visibleReaderPage(element)?.page ?? null;
+  }
+
+  function readerFocusMarkerTop(element: HTMLElement) {
+    const fallback = element.clientHeight * 0.42;
+    const offset = element.clientHeight >= 240 ? clampNumber(element.clientHeight * 0.38, 96, element.clientHeight - 96) : fallback;
+    return element.scrollTop + offset;
+  }
+
+  function visibleReaderPage(element: HTMLElement) {
     const pageShells = Array.from(element.querySelectorAll<HTMLElement>(".pdf-page-shell"));
     if (pageShells.length === 0) {
       return null;
     }
-    const markerTop = element.scrollTop + 72;
-    let nextPage = Number(pageShells[0].dataset.page ?? 1) || 1;
+    const viewportTop = element.scrollTop;
+    const viewportBottom = element.scrollTop + element.clientHeight;
+    const focusTop = readerFocusMarkerTop(element);
+    let best:
+      | {
+          page: number;
+          shell: HTMLElement;
+          visibleHeight: number;
+          focusDistance: number;
+        }
+      | null = null;
+    for (const shell of pageShells) {
+      const page = Number(shell.dataset.page ?? 0);
+      if (page <= 0) {
+        continue;
+      }
+      const top = shell.offsetTop;
+      const bottom = top + shell.offsetHeight;
+      const visibleHeight = Math.max(0, Math.min(bottom, viewportBottom) - Math.max(top, viewportTop));
+      if (visibleHeight <= 0) {
+        continue;
+      }
+      const focusDistance = focusTop < top ? top - focusTop : focusTop > bottom ? focusTop - bottom : 0;
+      if (
+        !best ||
+        visibleHeight > best.visibleHeight + 8 ||
+        (Math.abs(visibleHeight - best.visibleHeight) <= 8 && focusDistance < best.focusDistance)
+      ) {
+        best = { page, shell, visibleHeight, focusDistance };
+      }
+    }
+    if (best) {
+      return best;
+    }
+    const markerTop = readerFocusMarkerTop(element);
+    let fallback = Number(pageShells[0].dataset.page ?? 1) || 1;
+    let fallbackShell = pageShells[0];
     for (const shell of pageShells) {
       const page = Number(shell.dataset.page ?? 0);
       if (page > 0 && shell.offsetTop <= markerTop) {
-        nextPage = page;
+        fallback = page;
+        fallbackShell = shell;
       } else {
         break;
       }
     }
-    return nextPage;
+    return { page: fallback, shell: fallbackShell, visibleHeight: 0, focusDistance: 0 };
   }
 
   function captureLastReaderViewport(element: HTMLElement): ReaderBookmark | null {
@@ -379,19 +425,14 @@ export function useReaderViewportSync(input: ReaderViewportSyncInput) {
     if (pageShells.length === 0) {
       return;
     }
-    const markerTop = element.scrollTop + 72;
     const containerBox = element.getBoundingClientRect();
-    let nextPage = Number(pageShells[0].dataset.page ?? 1) || 1;
-    for (const shell of pageShells) {
-      const page = Number(shell.dataset.page ?? 0);
-      if (page > 0 && shell.offsetTop <= markerTop) {
-        nextPage = page;
-      } else {
-        break;
-      }
-    }
+    const currentPageCandidate = visibleReaderPage(element);
+    const markerTop = currentPageCandidate
+      ? Math.max(readerFocusMarkerTop(element), currentPageCandidate.shell.offsetTop + 8)
+      : readerFocusMarkerTop(element);
+    const nextPage = (currentPageCandidate?.page ?? Number(pageShells[0].dataset.page ?? 1)) || 1;
     setPageCursor((current) => (current === nextPage ? current : nextPage));
-    const currentShell = pageShells.find((shell) => Number(shell.dataset.page ?? 0) === nextPage);
+    const currentShell = currentPageCandidate?.shell ?? pageShells.find((shell) => Number(shell.dataset.page ?? 0) === nextPage);
     if (currentShell) {
       const visibleBottom = element.scrollTop + element.clientHeight;
       const progress = (visibleBottom - currentShell.offsetTop) / Math.max(1, currentShell.offsetHeight);

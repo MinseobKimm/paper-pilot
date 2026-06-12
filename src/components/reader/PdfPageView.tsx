@@ -327,18 +327,16 @@ export function PdfPageView(props: PdfPageViewProps) {
       layer.innerHTML = "";
       layer.style.width = `${viewport.width}px`;
       layer.style.height = `${viewport.height}px`;
-      const bounds = sentenceBounds(text, props.sentenceUnits);
-      let textCursor = 0;
+      const layerText = extractedTextLayer.text || text;
+      const bounds = sentenceBounds(layerText, props.sentenceUnits);
       const textBoxes: TextLayerBox[] = [];
       for (const sourceBox of extractedTextLayer.boxes) {
         const raw = sourceBox.text.trim();
         if (!raw) {
           continue;
         }
-        const itemIndex = text.indexOf(raw, textCursor);
-        const itemStart = itemIndex >= 0 ? itemIndex : textCursor;
-        const itemEnd = itemStart + raw.length;
-        textCursor = itemEnd;
+        const itemStart = sourceBox.start;
+        const itemEnd = Math.max(itemStart, sourceBox.end);
         const fontHeight = sourceBox.fontSize;
         const fontFamily = sourceBox.fontName ? `${sourceBox.fontName}, sans-serif` : "sans-serif";
         const targetWidth = sourceBox.rect.width > 0 ? sourceBox.rect.width : Math.max(1, measuredTextWidth(raw, fontHeight, fontFamily));
@@ -383,7 +381,7 @@ export function PdfPageView(props: PdfPageViewProps) {
       updateTextSpanFlags(layer, latestSearchTermRef.current, latestHoverSourceRef.current);
       props.onOutlineReady(props.pageNumber, detectedAnchors);
       setOutlineAnchors(detectedAnchors);
-      setTextLayerMetrics({ text, boxes: textBoxes });
+      setTextLayerMetrics({ text: layerText, boxes: textBoxes });
     }
     void renderPage();
     return () => {

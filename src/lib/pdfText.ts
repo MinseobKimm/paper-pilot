@@ -108,6 +108,24 @@ function lineCenterY(line: TextLine) {
   return line.rect.top + line.rect.height / 2;
 }
 
+function textBoxRight(box: TextLayerBox) {
+  return box.rect.left + box.rect.width;
+}
+
+function shouldStartVisualLineCluster(current: TextLayerBox[], box: TextLayerBox) {
+  const currentLeft = Math.min(...current.map((item) => item.rect.left));
+  const currentRight = Math.max(...current.map(textBoxRight));
+  const gap = box.rect.left - currentRight;
+  if (gap <= 0) {
+    return false;
+  }
+  const fontSize = Math.max(...current.map((item) => item.fontSize), box.fontSize, 8);
+  const longCurrent = currentRight - currentLeft > fontSize * 8;
+  const longNext = box.rect.width > fontSize * 8;
+  const breakGap = longCurrent || longNext ? Math.max(14, fontSize * 1.25) : Math.max(24, fontSize * 2.2);
+  return gap > breakGap;
+}
+
 export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTextLayoutMode | "auto" = "auto") {
   const sorted = [...boxes]
     .filter((box) => box.text.trim())
@@ -151,11 +169,7 @@ export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTe
         clusters.push([box]);
         continue;
       }
-      const previousRight = previous.rect.left + previous.rect.width;
-      const gap = box.rect.left - previousRight;
-      const fontSize = Math.max(previous.fontSize, box.fontSize, 8);
-      const columnGap = Math.max(42, fontSize * 3.2);
-      if (gap > columnGap) {
+      if (shouldStartVisualLineCluster(current, box)) {
         clusters.push([box]);
       } else {
         current.push(box);
@@ -227,7 +241,23 @@ export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTe
     return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
   }
   const splitX = splitAt > 0 ? (centers[splitAt - 1] + centers[splitAt]) / 2 : minLeft + span / 2;
-  const isFullWidth = (line: TextLine) => line.rect.width > span * 0.72;
+  const contentTop = Math.min(...lines.map((line) => line.rect.top));
+  const contentBottom = Math.max(...lines.map(lineBottom));
+  const contentHeight = Math.max(1, contentBottom - contentTop);
+  const fontMedian = medianNumber(lines.map((line) => line.fontSize).filter((size) => size > 0));
+  const pageMidpoint = minLeft + span / 2;
+  const isFullWidth = (line: TextLine) => {
+    if (line.rect.width > span * 0.72) {
+      return true;
+    }
+    const topRatio = (lineCenterY(line) - contentTop) / contentHeight;
+    const widthRatio = line.rect.width / span;
+    const centered = Math.abs(lineCenterX(line) - pageMidpoint) < span * 0.2;
+    if (topRatio < 0.05 && centered && widthRatio > 0.12) {
+      return true;
+    }
+    return topRatio < 0.22 && centered && widthRatio > 0.34 && line.fontSize >= fontMedian * 0.82;
+  };
   const columnFor = (line: TextLine) => {
     return line.rect.left + line.rect.width / 2 >= splitX ? 1 : 0;
   };
@@ -322,6 +352,14 @@ function pdfTextItemPosition(
     width: typeof item.width === "number" ? item.width : 0,
     height: typeof item.height === "number" ? item.height : Math.max(0, Math.hypot(transform[2], transform[3])),
   };
+}
+
+function isMostlyHorizontalTextTransform(transform: number[]) {
+  const baselineLength = Math.hypot(transform[0], transform[1]);
+  if (baselineLength <= 0) {
+    return true;
+  }
+  return Math.abs(transform[1]) / baselineLength <= 0.26;
 }
 
 function normalizeFormulaToken(token: string) {
@@ -894,6 +932,9 @@ export function pdfItemTextBoxes(
       continue;
     }
     const transform = item.transform ? util.transform(viewport.transform, item.transform) : [1, 0, 0, 1, 0, 0];
+    if (!isMostlyHorizontalTextTransform(transform)) {
+      continue;
+    }
     const fontHeight = Math.max(8, Math.hypot(transform[2], transform[3]));
     const fallbackWidth = Math.max(8, raw.length * fontHeight * 0.52);
     boxes.push({
