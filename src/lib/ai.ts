@@ -95,6 +95,7 @@ export class AgentCliProvider implements AiProvider {
       provider: this.provider,
       model,
       providerSessionId,
+      parentResultId: typeof task.payload.parentResultId === "string" ? task.payload.parentResultId : undefined,
     });
   }
 }
@@ -115,6 +116,7 @@ export class LocalDraftProvider implements AiProvider {
       status: "complete",
       createdAt: nowIso(),
       provider: "local-draft",
+      parentResultId: typeof task.payload.parentResultId === "string" ? task.payload.parentResultId : undefined,
     });
   }
 }

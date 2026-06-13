@@ -110,6 +110,7 @@ type ReaderWorkspaceProps = {
   onRememberOutlineAnchors: (pageNumber: number, rows: OutlineAnchor[]) => void;
   onRememberPageImage: (pageNumber: number, dataUrl: string) => void;
   onOpenExplanation: (annotation: AnnotationRecord) => void;
+  onOpenExplanationResult: (result: AiResultRecord) => void;
   onDeleteAnnotationById: (id: string) => void;
   onOpenLinkPreview: (target: PdfLinkPreviewTarget) => void;
   onOpenWordMeaningPopup: (popup: WordPopup) => void;
@@ -439,6 +440,7 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
           onDeleteAnnotation={props.onDeleteAnnotationById}
           onDeleteAllAnnotations={props.onDeleteAllActiveAnnotations}
           onDeleteExplanation={props.onDeleteExplanationResult}
+          onOpenExplanationResult={props.onOpenExplanationResult}
           onGoToPage={props.onGoToPage}
           onExtractCitations={props.onExtractCitationCards}
           onResolveCitationLinks={props.onResolveCitationLinks}

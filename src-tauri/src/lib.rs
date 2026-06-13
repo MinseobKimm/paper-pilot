@@ -126,6 +126,8 @@ pub struct AiResultRecord {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub provider_session_id: Option<String>,
+    #[serde(default)]
+    pub parent_result_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,7 +359,8 @@ fn migrate(conn: &Connection) -> AppResult<()> {
             created_at TEXT NOT NULL,
             provider TEXT,
             model TEXT,
-            provider_session_id TEXT
+            provider_session_id TEXT,
+            parent_result_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS citation_cards (
@@ -398,6 +401,10 @@ fn migrate(conn: &Connection) -> AppResult<()> {
     let _ = conn.execute("ALTER TABLE ai_results ADD COLUMN model TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE ai_results ADD COLUMN provider_session_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_results ADD COLUMN parent_result_id TEXT",
         [],
     );
 
@@ -557,6 +564,7 @@ fn row_ai_result(row: &Row<'_>) -> rusqlite::Result<AiResultRecord> {
         model: row.get(8)?,
         reasoning_effort: None,
         provider_session_id: row.get(9)?,
+        parent_result_id: row.get(10)?,
     })
 }
 
@@ -632,7 +640,7 @@ fn load_state_from_db(conn: &Connection) -> AppResult<AppStateRecord> {
     )?;
     let ai_results = collect_query(
         conn,
-        "SELECT id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id FROM ai_results ORDER BY created_at DESC",
+        "SELECT id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id, parent_result_id FROM ai_results ORDER BY created_at DESC",
         row_ai_result,
     )?;
     let citation_cards = collect_query(
@@ -730,7 +738,7 @@ fn export_bundle(conn: &Connection, document_id: &str) -> AppResult<ExportBundle
     };
     let ai_results = {
         let mut stmt = conn
-            .prepare("SELECT id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id FROM ai_results WHERE document_id = ?1 ORDER BY created_at DESC")
+            .prepare("SELECT id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id, parent_result_id FROM ai_results WHERE document_id = ?1 ORDER BY created_at DESC")
             .map_err(|error| error.to_string())?;
         let rows = stmt
             .query_map(params![document_id], row_ai_result)
@@ -1273,9 +1281,9 @@ fn delete_citation_card(app: AppHandle, id: String) -> AppResult<()> {
 fn save_ai_result(app: AppHandle, result: AiResultRecord) -> AppResult<AiResultRecord> {
     let conn = open_db(&app)?;
     conn.execute(
-        "INSERT INTO ai_results (id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(id) DO UPDATE SET output_text = excluded.output_text, status = excluded.status, provider = excluded.provider, model = excluded.model, provider_session_id = excluded.provider_session_id",
+        "INSERT INTO ai_results (id, document_id, task_type, input_text, output_text, status, created_at, provider, model, provider_session_id, parent_result_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET output_text = excluded.output_text, status = excluded.status, provider = excluded.provider, model = excluded.model, provider_session_id = excluded.provider_session_id, parent_result_id = excluded.parent_result_id",
         params![
             result.id,
             result.document_id,
@@ -1286,7 +1294,8 @@ fn save_ai_result(app: AppHandle, result: AiResultRecord) -> AppResult<AiResultR
             result.created_at,
             result.provider,
             result.model,
-            result.provider_session_id
+            result.provider_session_id,
+            result.parent_result_id
         ],
     )
     .map_err(|error| error.to_string())?;

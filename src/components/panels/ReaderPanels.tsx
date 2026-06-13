@@ -37,6 +37,7 @@ type RightPanelProps = {
   onDeleteAnnotation: (id: string) => void;
   onDeleteAllAnnotations: () => void;
   onDeleteExplanation: (result: AiResultRecord) => void;
+  onOpenExplanationResult: (result: AiResultRecord) => void;
   onGoToPage: (page: number) => void;
   onExtractCitations: () => void;
   onResolveCitationLinks: () => void;
@@ -95,6 +96,7 @@ export function RightPanel(props: RightPanelProps) {
             onGoToPage={props.onGoToPage}
             onCopy={props.onCopy}
             onDeleteExplanation={props.onDeleteExplanation}
+            onOpenExplanationResult={props.onOpenExplanationResult}
           />
         )}
         {props.document && props.tab === "activity" && (

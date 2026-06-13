@@ -26,6 +26,13 @@ export function providerLabel(provider: AiProviderKind): string {
 }
 
 export function inputTextFor(payload: Record<string, unknown>): string {
+  if (
+    typeof payload.parentResultId === "string" &&
+    typeof payload.question === "string" &&
+    payload.question.trim()
+  ) {
+    return payload.question.trim();
+  }
   if (Array.isArray(payload.words)) {
     const words = payload.words.filter((word): word is string => typeof word === "string" && word.trim().length > 0);
     const context = typeof payload.context === "string" && payload.context.trim() ? `\nContext: ${payload.context.trim()}` : "";
@@ -322,6 +329,20 @@ export function buildAiPrompt(task: AiTask): string {
   const question = typeof task.payload.question === "string" ? compactText(task.payload.question, 3000) : "";
   const originalQuestion = typeof task.payload.originalQuestion === "string" ? compactText(task.payload.originalQuestion, 3000) : "";
   const englishQuestion = typeof task.payload.englishQuestion === "string" ? compactText(task.payload.englishQuestion, 3000) : "";
+  const parentResultId = typeof task.payload.parentResultId === "string" ? compactText(task.payload.parentResultId, 120) : "";
+  const parentInputText = typeof task.payload.parentInputText === "string" ? compactText(task.payload.parentInputText, 3600) : "";
+  const parentOutputText = typeof task.payload.parentOutputText === "string" ? compactText(task.payload.parentOutputText, 6000) : "";
+  const conversationHistoryText = Array.isArray(task.payload.conversationHistory)
+    ? (task.payload.conversationHistory as Array<Record<string, unknown>>)
+        .map((item, index) => {
+          const user = typeof item.user === "string" ? compactText(item.user, 1600) : "";
+          const assistant = typeof item.assistant === "string" ? compactText(item.assistant, 2600) : "";
+          const label = typeof item.label === "string" ? compactText(item.label, 80) : `Turn ${index + 1}`;
+          return [label, user ? `User: ${user}` : "", assistant ? `Assistant: ${assistant}` : ""].filter(Boolean).join("\n");
+        })
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
   const answerVariantLabel =
     typeof task.payload.answerVariantLabel === "string"
       ? compactText(task.payload.answerVariantLabel, 80)
@@ -404,6 +425,27 @@ export function buildAiPrompt(task: AiTask): string {
           "If a page number cannot be verified, do not invent it; state that the page could not be verified.",
         ].join(" ")
       : "";
+  const followUpInstruction = parentResultId
+    ? [
+        "This request is a follow-up inside a saved explanation thread.",
+        "Use the selected content, the initial assistant explanation, and the conversation so far as context.",
+        "Answer the latest user question directly, and correct or refine the earlier explanation if needed.",
+      ].join(" ")
+    : "";
+  const regionImageQuestionInstruction = [
+    "The user is reading a paper, selects a captured image, and asks a question.",
+    "Given the full context, explain in a detailed but easy-to-understand way, utilizing bullet points.",
+    "Purpose:",
+    "- Help the user understand the question.",
+    "- Expand the user's thinking further.",
+    "Guidelines:",
+    "- Formulas should be written in LaTeX format.",
+    "- If the question is about a formula, write the equation in LaTeX format and explain it in detail, term by term.",
+    "- Answer in Korean except for proper nouns and technical terms.",
+    "- Explain the image in detail.",
+    "- Only when deemed necessary, connect research progress by highlighting how cited or citing works build upon or diverge from this paper's findings, what unresolved issues they tackle, and how that can inspire further investigation.",
+    "If no explicit user question is provided by the current app flow, treat the request as: explain this captured image in detail in the context of the paper.",
+  ].join("\n");
   const translationPairInstruction =
     task.taskType === "translatePage"
       ? `Translate the full source text into natural ${targetLanguage}, but keep alignment exact. Use the provided sentence IDs as the only alignment source. Return one JSON item per translated sentence ID; do not group multiple IDs into one item. For each item, sourceIds must contain exactly one provided ID, and source must be copied exactly from that ID source text. Do not invent, renumber, reorder, or omit source IDs for translated prose. The translation field must be written in ${targetLanguage}. ${conceptTermGlossInstruction} Translate the surrounding sentence naturally into ${targetLanguage}. Include prose captions, legends, and descriptions attached to figures, photos, graphs, charts, or tables when they explain the visual. Skip only table/chart/graph internals such as cell values, axis labels, tick labels, legend keys without prose, numeric-only fragments, headers/footers, references, and PDF extraction noise unless they are essential prose. Output only valid JSON: {"pairs":[{"sourceIds":["p1-s0"],"source":"exact original sentence for p1-s0","translation":"${targetLanguage} translation"}]}. Keep equations and LaTeX readable in Markdown LaTeX. Do not add explanations or Markdown fences.`
@@ -411,8 +453,7 @@ export function buildAiPrompt(task: AiTask): string {
   const taskInstruction: Record<string, string> = {
     explainText:
       "Explain the selected passage in Korean in the context of the paper. Clarify required background, notation, formulas, and technical terms without inventing content.",
-    explainRegionImage:
-      "Inspect the attached image region first. Explain visible figures, tables, formulas, or text in Korean using the surrounding paper context. If the image is unclear, rely only on the provided extracted text as supporting evidence.",
+    explainRegionImage: regionImageQuestionInstruction,
     translateText:
       `Translate the selected text into natural ${targetLanguage}. Keep model names, method names, datasets, benchmarks, metrics, acronyms, named components, and field-specific technical terms in English when that is clearer.`,
     translatePage: sentenceRows.length
@@ -461,10 +502,14 @@ export function buildAiPrompt(task: AiTask): string {
           ? sentenceRows.length
             ? `Translate into natural ${targetLanguage} using the sentence ID list exactly. Return only JSON in the required format.`
             : `Translate the page into natural ${targetLanguage} and preserve paragraph structure.`
+          : task.taskType === "explainRegionImage"
+            ? regionImageQuestionInstruction
           : (taskInstruction[task.taskType] ?? "Perform the requested document task.");
 
   return [
-    "You are Paper Pilot, a private academic PDF research assistant.",
+    task.taskType === "explainRegionImage"
+      ? "You are an assistant who helps users understand papers."
+      : "You are Paper Pilot, a private academic PDF research assistant.",
     task.taskType === "outlineDocument"
       ? "Return only the final outline JSON. Use exact English heading text from the PDF when the PDF is English. Do not translate, summarize, merge, or invent headings."
       : task.taskType === "classifyDocumentLayout"
@@ -480,6 +525,7 @@ export function buildAiPrompt(task: AiTask): string {
     languageAwareTaskInstruction,
     task.taskType === "outlineDocument" ? outlineJsonInstruction : "",
     chatEvidenceInstruction,
+    followUpInstruction,
     translationPairInstruction,
     structuredJsonReminder,
     promptDocumentLine,
@@ -496,10 +542,17 @@ export function buildAiPrompt(task: AiTask): string {
     originalQuestion ? `Original user question:\n${originalQuestion}` : "",
     englishQuestion ? `English inspection question:\n${englishQuestion}` : "",
     question ? `User question:\n${question}` : "",
+    parentInputText ? `Initial selected content or prompt:\n${parentInputText}` : "",
+    parentOutputText ? `Initial assistant explanation:\n${parentOutputText}` : "",
+    conversationHistoryText ? `Conversation so far:\n${conversationHistoryText}` : "",
     reference ? `Reference/link information:\n${reference}` : "",
     task.taskType === "chatWithPaper" && documentContextText ? documentContextText : "",
     url ? `URL:\n${url}` : "",
-    task.taskType === "explainRegionImage" ? "An image crop is attached. Inspect it directly when possible." : "",
+    task.taskType === "explainRegionImage"
+      ? typeof task.payload.imageDataUrl === "string"
+        ? "Context:\nThe selected image crop is attached. Inspect it directly when possible. Use the extracted page text only as surrounding paper context, and say clearly when the crop or context is insufficient."
+        : "Context:\nThis follow-up belongs to a saved selected-image explanation thread. Use the prior image explanation and conversation context; say clearly if the original crop must be inspected again to answer with confidence."
+      : "",
     pageText ? `Extracted document text:\n${pageText}` : "",
     task.taskType === "autoHighlight" ? "" : "Quote only necessary evidence and cite page numbers when useful.",
   ]
@@ -560,6 +613,9 @@ export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, u
   if (typeof task.payload.answerVariantLabel === "string") payload.answerVariantLabel = task.payload.answerVariantLabel;
   if (typeof task.payload.triggeredBy === "string") payload.triggeredBy = compactText(task.payload.triggeredBy, 80);
   if (typeof task.payload.parentResultId === "string") payload.parentResultId = compactText(task.payload.parentResultId, 120);
+  if (typeof task.payload.parentInputText === "string") payload.parentInputText = compactText(task.payload.parentInputText, 3600);
+  if (typeof task.payload.parentOutputText === "string") payload.parentOutputText = compactText(task.payload.parentOutputText, 6000);
+  if (Array.isArray(task.payload.conversationHistory)) payload.conversationHistory = task.payload.conversationHistory;
   if (task.payload.region) payload.region = task.payload.region;
   if (typeof task.payload.imageDataUrl === "string") payload.imageDataUrl = task.payload.imageDataUrl;
   if (task.taskType === "chatWithPaper") {

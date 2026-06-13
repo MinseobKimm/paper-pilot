@@ -222,7 +222,7 @@ export function useBridgeResults(input: BridgeResultsInput) {
           }
         }
         if (["explainText", "explainRegionImage", "translateText"].includes(item.taskType.toString())) {
-          setFloatingResultId(item.id);
+          setFloatingResultId(item.parentResultId || item.id);
         }
       }
     }

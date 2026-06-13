@@ -104,7 +104,13 @@ export function useActiveDocumentData(input: ActiveDocumentDataInput) {
     [activeDocument, input.state.notes],
   );
   const floatingResult = useMemo(
-    () => activeAiResults.find((result) => result.id === input.floatingResultId) ?? null,
+    () => {
+      const selected = activeAiResults.find((result) => result.id === input.floatingResultId) ?? null;
+      if (!selected?.parentResultId) {
+        return selected;
+      }
+      return activeAiResults.find((result) => result.id === selected.parentResultId) ?? selected;
+    },
     [activeAiResults, input.floatingResultId],
   );
   const bridgePath = input.state.settings.bridgePath || "bridge";

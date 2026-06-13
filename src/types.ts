@@ -129,6 +129,7 @@ export type AiResultRecord = {
   model?: string;
   reasoningEffort?: string;
   providerSessionId?: string;
+  parentResultId?: string;
 };
 
 export type CitationCardRecord = {

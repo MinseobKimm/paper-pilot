@@ -789,11 +789,14 @@ function App() {
       }
       const explicitProviderSessionId =
         typeof taskPayload.providerSessionId === "string" ? taskPayload.providerSessionId : "";
-      const reusableSessionResults =
-        taskType === "chatWithPaper"
-          ? activeAiResults.filter((result) => result.taskType.toString() === "chatWithPaper")
-          : activeAiResults;
-      const providerSessionId = explicitProviderSessionId || latestProviderSessionId(reusableSessionResults, providerKind);
+      const providerSessionId =
+        explicitProviderSessionId ||
+        (taskType === "chatWithPaper"
+          ? latestProviderSessionId(
+              activeAiResults.filter((result) => result.taskType.toString() === "chatWithPaper"),
+              providerKind,
+            )
+          : "");
       const queued = await runAiTask(providerKind, bridgePath, taskType, activeDocument, {
         ...taskPayload,
         customPrompt: state.settings.customPrompt,
@@ -807,7 +810,7 @@ function App() {
         setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
       }
       if (isExplanationTask) {
-        setFloatingResultId(queued.id);
+        setFloatingResultId(typeof taskPayload.parentResultId === "string" ? taskPayload.parentResultId : queued.id);
       }
       if (!options.keepPanel && !isExplanationTask) {
         setActivePanel("ai");
@@ -846,6 +849,51 @@ function App() {
         showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error");
       }
       return null;
+    }
+  }
+
+  async function queueExplanationFollowUp(rootResult: AiResultRecord, question: string): Promise<void> {
+    const trimmedQuestion = question.trim();
+    if (!trimmedQuestion) {
+      return;
+    }
+    const rootId = rootResult.parentResultId || rootResult.id;
+    const root = activeAiResults.find((result) => result.id === rootId) ?? rootResult;
+    if (!["explainText", "explainRegionImage"].includes(root.taskType.toString())) {
+      return;
+    }
+    const threadResults = activeAiResults
+      .filter((result) => result.id === rootId || result.parentResultId === rootId)
+      .slice()
+      .sort((a, b) => {
+        const aTime = new Date(a.createdAt).getTime();
+        const bTime = new Date(b.createdAt).getTime();
+        return (Number.isNaN(aTime) ? 0 : aTime) - (Number.isNaN(bTime) ? 0 : bTime);
+      });
+    const latestSessionResult = threadResults
+      .slice()
+      .reverse()
+      .find((result) => normalizeAiProviderKind(result.provider) === normalizeAiProviderKind(state.settings.aiProvider) && result.providerSessionId);
+    const conversationHistory = threadResults.map((result, index) => ({
+      label: index === 0 ? "Initial explanation" : `Follow-up ${index}`,
+      user: index === 0 ? result.inputText : stripChatAskPrefix(result.inputText),
+      assistant: getReadableAiOutput(result, ui),
+    }));
+    const queued = await queueTask(
+      root.taskType as AiTaskType,
+      {
+        question: trimmedQuestion,
+        parentResultId: rootId,
+        parentInputText: root.inputText,
+        parentOutputText: getReadableAiOutput(root, ui),
+        conversationHistory,
+        providerSessionId: latestSessionResult?.providerSessionId || root.providerSessionId || "",
+        ...(root.taskType.toString() === "explainText" ? { text: root.inputText } : {}),
+      },
+      { keepPanel: true },
+    );
+    if (queued) {
+      setFloatingResultId(rootId);
     }
   }
 
@@ -1643,6 +1691,10 @@ function App() {
             onRememberOutlineAnchors={rememberOutlineAnchors}
             onRememberPageImage={rememberPageImage}
             onOpenExplanation={openExplanation}
+            onOpenExplanationResult={(result) => {
+              setFloatingAvoidRect(null);
+              setFloatingResultId(result.parentResultId || result.id);
+            }}
             onDeleteAnnotationById={(id) => void deleteAnnotationById(id)}
             onOpenLinkPreview={(target) => void openLinkPreview(target)}
             onOpenWordMeaningPopup={openWordMeaningPopup}
@@ -1704,6 +1756,7 @@ function App() {
       {floatingResult && (!floatingResultIsTranslation || translationPanelOpen) && (
         <FloatingAiCard
           result={floatingResult}
+          results={activeAiResults}
           avoidRect={floatingAvoidRect}
           onClose={() => {
             setFloatingResultId(null);
@@ -1714,6 +1767,7 @@ function App() {
             setFloatingAvoidRect(null);
             void deleteExplanationResult(result);
           }}
+          onFollowUp={(result, question) => queueExplanationFollowUp(result, question)}
         />
       )}
 

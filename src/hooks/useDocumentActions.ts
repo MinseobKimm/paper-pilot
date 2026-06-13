@@ -190,16 +190,21 @@ export function useDocumentActions(input: DocumentActionsInput) {
   }
 
   async function deleteExplanationResult(result: AiResultRecord) {
-    const linkedAnnotations = activeAnnotations.filter((annotation) => explanationResultId(annotation) === result.id);
+    const rootId = result.parentResultId || result.id;
+    const linkedAnnotations = activeAnnotations.filter((annotation) => explanationResultId(annotation) === rootId);
     const linkedAnnotationIds = new Set(linkedAnnotations.map((annotation) => annotation.id));
+    const linkedResultIds = activeAiResults
+      .filter((item) => item.id === rootId || item.parentResultId === rootId)
+      .map((item) => item.id);
     try {
       await Promise.all(linkedAnnotations.map((annotation) => deleteAnnotation(annotation.id)));
-      await deleteAiResults([result.id]);
+      await deleteAiResults(linkedResultIds);
       patchState((draft) => {
         draft.annotations = draft.annotations.filter((annotation) => !linkedAnnotationIds.has(annotation.id));
-        draft.aiResults = draft.aiResults.filter((item) => item.id !== result.id);
+        const remove = new Set(linkedResultIds);
+        draft.aiResults = draft.aiResults.filter((item) => !remove.has(item.id));
       });
-      if (floatingResultId === result.id) {
+      if (floatingResultId && linkedResultIds.includes(floatingResultId)) {
         setFloatingResultId(null);
       }
       showToast(ui.deletedExplanation);

@@ -30,6 +30,7 @@ export function AssistantPanel(props: {
   onGoToPage: (page: number) => void;
   onCopy: (text: string, label: string) => void;
   onDeleteExplanation: (result: AiResultRecord) => void;
+  onOpenExplanationResult: (result: AiResultRecord) => void;
 }) {
   const ui = useUiStrings();
   return (
@@ -64,6 +65,7 @@ export function AssistantPanel(props: {
           onCopy={props.onCopy}
           onHoverSource={props.onHoverSource}
           onDeleteExplanation={props.onDeleteExplanation}
+          onOpenExplanationResult={props.onOpenExplanationResult}
         />
       )}
     </div>
@@ -160,10 +162,13 @@ function QuoteCardPanel(props: {
   onCopy: (text: string, label: string) => void;
   onHoverSource: (value: string | null) => void;
   onDeleteExplanation: (result: AiResultRecord) => void;
+  onOpenExplanationResult: (result: AiResultRecord) => void;
 }) {
   const ui = useUiStrings();
-  const quoteResults = props.results.filter((result) =>
-    ["explainText", "explainRegionImage", "citationReason", "externalLinkSummary"].includes(result.taskType.toString()),
+  const quoteResults = props.results.filter(
+    (result) =>
+      !result.parentResultId &&
+      ["explainText", "explainRegionImage", "citationReason", "externalLinkSummary"].includes(result.taskType.toString()),
   );
   return (
     <section className="quote-card-panel">
@@ -185,16 +190,34 @@ function QuoteCardPanel(props: {
         const linkedAnnotation = props.annotations.find((annotation) => explanationResultId(annotation) === result.id);
         const isExplanation = explanationTasks.has(result.taskType.toString());
         const pageLabel = linkedAnnotation ? `Page ${linkedAnnotation.page}` : "";
+        const followUpCount = props.results.filter((item) => item.parentResultId === result.id).length;
         return (
           <article
             key={result.id}
             className="quote-card"
+            role={isExplanation ? "button" : undefined}
+            tabIndex={isExplanation ? 0 : undefined}
             onMouseEnter={() => props.onHoverSource(result.inputText)}
             onMouseLeave={() => props.onHoverSource(null)}
+            onClick={(event) => {
+              if (!isExplanation || (event.target as HTMLElement).closest("button")) {
+                return;
+              }
+              props.onOpenExplanationResult(result);
+            }}
+            onKeyDown={(event) => {
+              if (!isExplanation || (event.target as HTMLElement).closest("button")) {
+                return;
+              }
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                props.onOpenExplanationResult(result);
+              }
+            }}
           >
             <div className="quote-avatar">Tt</div>
             <div>
-              <time>{[formatResultTime(result.createdAt), "Chat 0", pageLabel].filter(Boolean).join(" / ")}</time>
+              <time>{[formatResultTime(result.createdAt), `Chat ${followUpCount}`, pageLabel].filter(Boolean).join(" / ")}</time>
               <h4>{taskTitle(result.taskType.toString(), ui)}</h4>
               <FormattedAiText text={getReadableAiOutput(result, ui)} compact={!isExplanation} />
             </div>

@@ -3289,6 +3289,16 @@ select:disabled {
   border-bottom: 1px solid #dfdfe6;
 }
 
+.quote-card[role="button"] {
+  cursor: pointer;
+}
+
+.quote-card[role="button"]:hover,
+.quote-card[role="button"]:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, #e7f2ee 45%, transparent);
+}
+
 .quote-avatar {
   display: grid;
   place-items: center;
@@ -3402,14 +3412,128 @@ select:disabled {
   gap: 8px;
 }
 
+.floating-thread-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #edf2f0;
+  color: #586661;
+  font-size: 11px;
+  font-weight: 850;
+}
+
 .floating-card-head button {
   border: 0;
   cursor: pointer;
 }
 
 .floating-card-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.floating-card-thread {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 18px 22px;
+}
+
+.floating-thread-turn {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.floating-thread-question {
+  justify-self: end;
+  max-width: 86%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #e7f2ee;
+  color: #142620;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.floating-thread-answer {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  line-height: 1.6;
+}
+
+.floating-thread-answer.pending {
+  padding: 10px 12px;
+  border: 1px solid #d4e1ef;
+  border-radius: 10px;
+  background: #f5f9fd;
+}
+
+.floating-thread-answer.failed {
+  padding: 10px 12px;
+  border: 1px solid #f0c7c2;
+  border-radius: 10px;
+  background: #fff7f5;
+}
+
+.floating-thread-meta {
+  color: #87928e;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.floating-followup-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: end;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid #e4e4ea;
+  background: #ffffff;
+}
+
+.floating-followup-composer textarea {
+  width: 100%;
+  min-height: 42px;
+  max-height: 118px;
+  padding: 10px 12px;
+  border: 1px solid #d8d8e0;
+  border-radius: 8px;
+  outline: 0;
+  resize: vertical;
+  background: #fbfcfa;
+  color: #2b302e;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.floating-followup-composer textarea:focus {
+  border-color: #9fbab1;
+  box-shadow: 0 0 0 3px rgba(45, 114, 95, 0.12);
+}
+
+.floating-followup-composer button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #cfd8d4;
+  border-radius: 8px;
+  background: #2d725f;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.floating-followup-composer button:disabled,
+.floating-followup-composer textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .link-preview-backdrop {
