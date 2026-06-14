@@ -50,6 +50,7 @@ type ReaderAutomationInput = {
   setTranslationEligiblePages: (pages: Set<number>) => void;
   queueTranslationForPage: (page: PageRecord, options?: { silent?: boolean; force?: boolean }) => Promise<AiResultRecord | null>;
   queueTask: QueueTask;
+  ensureActivePages: () => Promise<PageRecord[]>;
   extractOrderedPagesFromPdf: (document: DocumentRecord, pdf: PdfDocumentProxy) => Promise<PageRecord[]>;
   replaceExtractedPages: (documentId: string, pages: PageRecord[]) => Promise<void>;
   saveDocumentLayoutFromResult: (result: AiResultRecord) => Promise<void>;
@@ -79,6 +80,7 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     setTranslationEligiblePages,
     queueTranslationForPage,
     queueTask,
+    ensureActivePages,
     extractOrderedPagesFromPdf,
     replaceExtractedPages,
     saveDocumentLayoutFromResult,
@@ -102,6 +104,9 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     let cancelled = false;
     async function queueNextPage() {
       if (cancelled || activePages.length === 0) {
+        if (!cancelled && activePages.length === 0) {
+          await ensureActivePages();
+        }
         return;
       }
       const pages = activePages;

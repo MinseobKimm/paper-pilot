@@ -1381,6 +1381,7 @@ function App() {
     setTranslationEligiblePages,
     queueTranslationForPage,
     queueTask,
+    ensureActivePages,
     extractOrderedPagesFromPdf,
     replaceExtractedPages,
     saveDocumentLayoutFromResult,

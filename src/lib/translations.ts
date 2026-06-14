@@ -128,25 +128,26 @@ export function parseTranslationLines(outputText: string, expectedCount: number)
   return smartSentenceParts(readable);
 }
 
+function parseSourceIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? "").trim())
+      .filter((item) => /^p\d+-s\d+$/.test(item));
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,\s]+/)
+      .map((item) => item.trim())
+      .filter((item) => /^p\d+-s\d+$/.test(item));
+  }
+  return [];
+}
+
 export function parseTranslationPairs(outputText: string): TranslationPair[] {
   const readable = stripJsonFence(cleanAiOutput(outputText));
   if (!readable) {
     return [];
   }
-  const parseSourceIds = (value: unknown): string[] => {
-    if (Array.isArray(value)) {
-      return value
-        .map((item) => String(item ?? "").trim())
-        .filter((item) => /^p\d+-s\d+$/.test(item));
-    }
-    if (typeof value === "string") {
-      return value
-        .split(/[,\s]+/)
-        .map((item) => item.trim())
-        .filter((item) => /^p\d+-s\d+$/.test(item));
-    }
-    return [];
-  };
   try {
     const parsed = parseAiJson(readable);
     const rows = Array.isArray(parsed)
@@ -232,18 +233,28 @@ export function parseTranslationMap(outputText: string): Map<string, string> {
     const parsed = parseAiJson(readable);
     const rows = Array.isArray(parsed)
       ? parsed
-      : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { sentences?: unknown }).sentences)
-        ? (parsed as { sentences: unknown[] }).sentences
-        : [];
+      : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { pairs?: unknown }).pairs)
+        ? (parsed as { pairs: unknown[] }).pairs
+        : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { translations?: unknown }).translations)
+          ? (parsed as { translations: unknown[] }).translations
+          : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { sentences?: unknown }).sentences)
+            ? (parsed as { sentences: unknown[] }).sentences
+            : [];
     for (const row of rows) {
       if (typeof row !== "object" || row === null) {
         continue;
       }
       const record = row as Record<string, unknown>;
-      const id = String(record.id ?? "");
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      const sourceIds = parseSourceIds(
+        record.sourceIds ?? record.source_ids ?? record.sentenceIds ?? record.sentence_ids ?? record.ids ?? (id ? [id] : []),
+      );
       const translation = String(record.translation ?? record.ko ?? record.korean ?? record.text ?? "").trim();
-      if (id && translation) {
-        map.set(id, translation);
+      if (!translation) {
+        continue;
+      }
+      for (const sourceId of sourceIds) {
+        map.set(sourceId, translation);
       }
     }
   } catch {
@@ -382,22 +393,28 @@ export function translationPairUnitsForPage(page: PageRecord | undefined, result
           .map((id) => sourceUnitById.get(id))
           .filter((unit): unit is SentenceUnit => unit !== undefined)
           .filter((unit) => !usedIds.has(unit.id));
-        const idMatchedSource = idMatchedUnits.map((unit) => unit.source).join(" ");
-        const idMatchIsExact =
-          idMatchedUnits.length > 0 &&
-          (!pair.source || normalizeForMatch(pair.source) === normalizeForMatch(idMatchedSource));
-        const matchedUnits = idMatchIsExact ? idMatchedUnits : exactUnitsForSource(pair.source, sourceUnits, usedIds);
-        matchedUnits.forEach((unit) => usedIds.add(unit.id));
-        const firstMatched = matchedUnits[0] ?? null;
+        const matchedUnits =
+          idMatchedUnits.length > 0
+            ? idMatchedUnits
+            : exactUnitsForSource(pair.source, sourceUnits, usedIds);
+        const fuzzyMatchedUnit = matchedUnits.length > 0 ? null : bestUnitForSource(pair.source, sourceUnits, usedIds);
+        const fallbackMatchedUnits =
+          matchedUnits.length > 0
+            ? matchedUnits
+            : fuzzyMatchedUnit
+              ? [fuzzyMatchedUnit]
+              : [];
+        fallbackMatchedUnits.forEach((unit) => usedIds.add(unit.id));
+        const firstMatched = fallbackMatchedUnits[0] ?? null;
         return {
           id: firstMatched?.id ?? `p${page.pageNumber}-ai${index}`,
           page: page.pageNumber,
           index,
-          source: pair.source || matchedUnits.map((unit) => unit.source).join(" "),
+          source: fallbackMatchedUnits.map((unit) => unit.source).join(" ") || pair.source,
           translation: pair.translation,
           status: "complete" as const,
           aiSegment: true,
-          sourceIds: matchedUnits.map((unit) => unit.id),
+          sourceIds: fallbackMatchedUnits.map((unit) => unit.id),
         };
       })
       .filter((unit) => unit.translation && unit.sourceIds.length > 0);

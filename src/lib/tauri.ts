@@ -239,6 +239,28 @@ export async function savePages(documentId: string, pages: PageRecord[]): Promis
   saveBrowserState(state);
 }
 
+export async function upsertPages(documentId: string, pages: PageRecord[]): Promise<void> {
+  if (pages.length === 0) {
+    return;
+  }
+  const invoke = await getInvoke();
+  if (invoke) {
+    await invoke("upsert_pages", { documentId, pages });
+    return;
+  }
+  const state = loadBrowserState();
+  const incoming = new Set(pages.map((page) => `${page.documentId}:${page.pageNumber}`));
+  state.pages = state.pages
+    .filter((page) => !incoming.has(`${page.documentId}:${page.pageNumber}`))
+    .concat(pages);
+  const doc = state.documents.find((item) => item.id === documentId);
+  if (doc) {
+    doc.pageCount = Math.max(doc.pageCount, ...pages.map((page) => page.pageNumber));
+    doc.updatedAt = new Date().toISOString();
+  }
+  saveBrowserState(state);
+}
+
 export async function upsertFolder(folder: FolderRecord): Promise<FolderRecord> {
   const invoke = await getInvoke();
   if (invoke) {

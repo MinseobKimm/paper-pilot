@@ -3,7 +3,7 @@ import type { AiResultRecord, AiTaskType, AnnotationRecord, AppStateRecord, Docu
 import { createAutoHighlights } from "../lib/highlights";
 import { annotationKey } from "../lib/annotationHelpers";
 import { autoHighlightRequestKey, hasAutoHighlightRequestForPage, stalePendingTranslationMs } from "../lib/translations";
-import { savePages, upsertAnnotation } from "../lib/tauri";
+import { savePages, upsertAnnotation, upsertPages } from "../lib/tauri";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
 
 type PatchState = (mutator: (draft: AppStateRecord) => void) => void;
@@ -93,6 +93,9 @@ export function usePagePersistence(input: PagePersistenceInput) {
         .concat(page);
       return { ...current, pages };
     });
+    void upsertPages(page.documentId, [page]).catch((error) =>
+      showToast(`${ui.couldNotSavePageTextPrefix}: ${String(error)}`, "error"),
+    );
     if (state.settings.autoTranslate === "true" && translationEligiblePages.has(page.pageNumber)) {
       void queueTranslationForPage(page, { silent: true });
     }

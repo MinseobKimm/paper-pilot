@@ -1136,6 +1136,23 @@ fn save_pages(app: AppHandle, document_id: String, pages: Vec<PageRecord>) -> Ap
 }
 
 #[tauri::command]
+fn upsert_pages(app: AppHandle, document_id: String, pages: Vec<PageRecord>) -> AppResult<()> {
+    let conn = open_db(&app)?;
+    for page in pages
+        .into_iter()
+        .filter(|page| page.document_id == document_id)
+    {
+        conn.execute(
+            "INSERT INTO pages (document_id, page_number, text, outline_label) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(document_id, page_number) DO UPDATE SET text = excluded.text, outline_label = excluded.outline_label",
+            params![page.document_id, page.page_number, page.text, page.outline_label],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn upsert_folder(app: AppHandle, folder: FolderRecord) -> AppResult<FolderRecord> {
     let conn = open_db(&app)?;
     conn.execute(
@@ -3448,6 +3465,7 @@ pub fn run() {
             write_bridge_task,
             read_bridge_result,
             start_bridge_worker,
+            upsert_pages,
             get_agent_provider_status,
             export_document_json,
             export_document_zip,
