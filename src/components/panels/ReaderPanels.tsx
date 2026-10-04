@@ -1,5 +1,5 @@
 import type { PointerEvent } from "react";
-import { ListPlus, MessageSquare, PenLine, Quote, Sparkles, X } from "../icons";
+import { Info, ListPlus, MessageSquare, PenLine, Quote, Sparkles, X } from "../icons";
 import { AssistantPanel, type ReaderAssistantMode } from "./AssistantPanel";
 import { ActivityPanel } from "./tabs/ActivityPanel";
 import { CitationsPanel } from "./tabs/CitationsPanel";
@@ -29,6 +29,7 @@ type RightPanelProps = {
   setAssistantMode: (mode: ReaderAssistantMode) => void;
   pageCursor: number;
   pageImages: Record<number, string>;
+  onNewChat: () => Promise<void>;
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
   onRunBridge: () => void;
   onPollBridge: () => void;
@@ -57,7 +58,6 @@ type RightPanelProps = {
 
 export function RightPanel(props: RightPanelProps) {
   const ui = useUiStrings();
-  const fullText = props.pages.map((page) => page.text).join("\n\n");
   return (
     <aside className="right-panel">
       <button className="panel-resizer left" title={ui.resizeRightPanel} onPointerDown={props.onResizeStart} />
@@ -77,6 +77,9 @@ export function RightPanel(props: RightPanelProps) {
         <button className={props.tab === "citations" ? "assistant-tool active" : "assistant-tool"} title={ui.citations} data-tooltip={ui.citations} aria-label={ui.citations} onClick={() => props.setTab("citations")}>
           <ListPlus size={17} />
         </button>
+        <button className={props.tab === "info" ? "assistant-tool active" : "assistant-tool"} title={ui.documentInfo} data-tooltip={ui.documentInfo} aria-label={ui.documentInfo} onClick={() => props.setTab("info")}>
+          <Info size={17} />
+        </button>
         <button className="assistant-tool close" title={ui.close} data-tooltip={ui.close} aria-label={ui.close} onClick={props.onClose}>
           <X size={17} />
         </button>
@@ -91,6 +94,7 @@ export function RightPanel(props: RightPanelProps) {
             chatDraft={props.chatDraft}
             setChatDraft={props.setChatDraft}
             mode={props.assistantMode}
+            onNewChat={props.onNewChat}
             onQueueTask={props.onQueueTask}
             onHoverSource={props.onHoverSource}
             onGoToPage={props.onGoToPage}
@@ -122,7 +126,7 @@ export function RightPanel(props: RightPanelProps) {
           />
         )}
         {props.document && props.tab === "notes" && (
-          <NotesPanel note={props.note} fullText={fullText} onSaveNote={props.onSaveNote} onDeleteNote={props.onDeleteNote} />
+          <NotesPanel key={props.document.id} documentId={props.document.id} obsidianEnabled={props.settings.obsidianEnabled === "true"} language={props.settings.uiLanguage === "ko" || props.settings.language === "ko" ? "ko" : "en"} note={props.note} onSaveNote={props.onSaveNote} onDeleteNote={props.onDeleteNote} />
         )}
         {props.document && props.tab === "info" && (
           <InfoPanel

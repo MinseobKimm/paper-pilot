@@ -1,4 +1,7 @@
-import * as pdfjsLib from "pdfjs-dist";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { readingOrderForLines } from "./pdfReadingOrder";
+export const pdfTextExtractionVersion = "regional-layout-v3";
+export const pdfTextExtractionVersionKey = (documentId: string) => `pdfTextExtractionVersion:${documentId}`;
 import type { HighlightRect } from "../types";
 
 export type PdfTextItem = { str?: string; transform?: number[]; fontName?: string; width?: number; height?: number };
@@ -38,6 +41,7 @@ export type TextLayerBox = {
   fontSize: number;
   fontName: string;
   order?: number;
+  flowId?: number;
 };
 
 export type TextLine = {
@@ -46,6 +50,7 @@ export type TextLine = {
   fontSize: number;
   fontNames: string[];
   boxes: TextLayerBox[];
+  flowId?: number;
 };
 
 export type PageTextLayoutInference = {
@@ -113,20 +118,18 @@ function textBoxRight(box: TextLayerBox) {
 }
 
 function shouldStartVisualLineCluster(current: TextLayerBox[], box: TextLayerBox) {
-  const currentLeft = Math.min(...current.map((item) => item.rect.left));
   const currentRight = Math.max(...current.map(textBoxRight));
   const gap = box.rect.left - currentRight;
   if (gap <= 0) {
     return false;
   }
-  const fontSize = Math.max(...current.map((item) => item.fontSize), box.fontSize, 8);
-  const longCurrent = currentRight - currentLeft > fontSize * 8;
-  const longNext = box.rect.width > fontSize * 8;
-  const breakGap = longCurrent || longNext ? Math.max(14, fontSize * 1.25) : Math.max(24, fontSize * 2.2);
-  return gap > breakGap;
+  const fontSize = Math.max(...current.map((item) => item.fontSize), box.fontSize, 1);
+  // A short equation number beside the next column is still separated by a
+  // gutter. Requiring a larger gap for short runs would join the two columns.
+  return gap > fontSize * 0.9;
 }
 
-export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTextLayoutMode | "auto" = "auto") {
+export function visualTextLinesFromBoxes(boxes: TextLayerBox[]) {
   const sorted = [...boxes]
     .filter((box) => box.text.trim())
     .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
@@ -141,7 +144,7 @@ export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTe
     for (let index = groups.length - 1; index >= 0; index -= 1) {
       const group = groups[index];
       const groupMid = (group.top + group.bottom) / 2;
-      const tolerance = Math.max(5, Math.min(box.rect.height, group.bottom - group.top) * 0.65);
+      const tolerance = Math.min(box.rect.height, group.bottom - group.top) * 0.45;
       if (Math.abs(groupMid - midY) <= tolerance) {
         existing = group;
         break;
@@ -189,7 +192,7 @@ export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTe
         const previousRight = previous.rect.left + previous.rect.width;
         const gap = box.rect.left - previousRight;
         const tightJoin =
-          gap <= Math.max(4, Math.min(previous.fontSize, box.fontSize) * 0.28) ||
+          gap <= Math.min(previous.fontSize, box.fontSize) * 0.12 ||
           /^[,.;:!?%)}\]]/.test(box.text) ||
           /[({\[]$/.test(previous.text);
         text += tightJoin ? box.text : ` ${box.text}`;
@@ -212,77 +215,12 @@ export function textLinesFromBoxes(boxes: TextLayerBox[], layoutMode: DocumentTe
       } satisfies TextLine;
     })
     .filter((line) => line.text.length > 0);
-  if (lines.length < 4 || layoutMode === "single") {
-    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-  }
-  const minLeft = Math.min(...lines.map((line) => line.rect.left));
-  const maxRight = Math.max(...lines.map((line) => line.rect.left + line.rect.width));
-  const span = Math.max(1, maxRight - minLeft);
-  const bodyLines = lines.filter((line) => {
-    const width = line.rect.width;
-    const center = line.rect.left + width / 2;
-    return width < span * 0.72 && center > minLeft + span * 0.08 && center < maxRight - span * 0.08;
-  });
-  if (bodyLines.length < 4 && layoutMode !== "two-column") {
-    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-  }
-  const centers = bodyLines.map((line) => line.rect.left + line.rect.width / 2).sort((a, b) => a - b);
-  let bestGap = 0;
-  let splitAt = -1;
-  for (let index = 1; index < centers.length; index += 1) {
-    const gap = centers[index] - centers[index - 1];
-    if (gap > bestGap) {
-      bestGap = gap;
-      splitAt = index;
-    }
-  }
-  const twoColumn = layoutMode === "two-column" || (splitAt > 0 && bestGap > Math.max(72, span * 0.16));
-  if (!twoColumn) {
-    return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-  }
-  const splitX = splitAt > 0 ? (centers[splitAt - 1] + centers[splitAt]) / 2 : minLeft + span / 2;
-  const contentTop = Math.min(...lines.map((line) => line.rect.top));
-  const contentBottom = Math.max(...lines.map(lineBottom));
-  const contentHeight = Math.max(1, contentBottom - contentTop);
-  const fontMedian = medianNumber(lines.map((line) => line.fontSize).filter((size) => size > 0));
-  const pageMidpoint = minLeft + span / 2;
-  const isFullWidth = (line: TextLine) => {
-    if (line.rect.width > span * 0.72) {
-      return true;
-    }
-    const topRatio = (lineCenterY(line) - contentTop) / contentHeight;
-    const widthRatio = line.rect.width / span;
-    const centered = Math.abs(lineCenterX(line) - pageMidpoint) < span * 0.2;
-    if (topRatio < 0.05 && centered && widthRatio > 0.12) {
-      return true;
-    }
-    return topRatio < 0.22 && centered && widthRatio > 0.34 && line.fontSize >= fontMedian * 0.82;
-  };
-  const columnFor = (line: TextLine) => {
-    return line.rect.left + line.rect.width / 2 >= splitX ? 1 : 0;
-  };
-  const sortSegment = (segment: TextLine[]) =>
-    segment.sort((a, b) => {
-      const columnA = columnFor(a);
-      const columnB = columnFor(b);
-      if (columnA !== columnB) {
-        return columnA - columnB;
-      }
-      return a.rect.top - b.rect.top || a.rect.left - b.rect.left;
-    });
-  const ordered: TextLine[] = [];
-  let segment: TextLine[] = [];
-  for (const line of [...lines].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)) {
-    if (isFullWidth(line)) {
-      ordered.push(...sortSegment(segment));
-      segment = [];
-      ordered.push(line);
-    } else {
-      segment.push(line);
-    }
-  }
-  ordered.push(...sortSegment(segment));
-  return ordered;
+  return lines.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+}
+
+export function textLinesFromBoxes(boxes: TextLayerBox[], _layoutMode: DocumentTextLayoutMode | "auto" = "auto") {
+  // Stored page-wide classifications are hints only: each region has its own order.
+  return readingOrderForLines(visualTextLinesFromBoxes(boxes)).lines;
 }
 
 export function joinHyphenatedLineText(previous: string, next: string) {
@@ -295,49 +233,41 @@ export function joinHyphenatedLineText(previous: string, next: string) {
 }
 
 export function textFromOrderedLines(lines: TextLine[]) {
-  return lines.reduce((text, line) => (text ? joinHyphenatedLineText(text, line.text) : line.text), "");
+  return textAndBoxesFromOrderedLines(lines).text;
 }
 
 export function textAndBoxesFromOrderedLines(lines: TextLine[]) {
-  const text = textFromOrderedLines(lines);
+  let text = "";
   const boxes: TextLayerBox[] = [];
-  let textCursor = 0;
   for (const [lineIndex, line] of lines.entries()) {
-    const previousLine = lineIndex > 0 ? lines[lineIndex - 1] : null;
-    const joinedHyphen = Boolean(previousLine && /[A-Za-z]-$/.test(previousLine.text.trimEnd()) && /^[A-Za-z]/.test(line.text.trimStart()));
-    if (lineIndex > 0 && !joinedHyphen) {
-      textCursor += 1;
+    const previous = lines[lineIndex - 1];
+    const sameFlow = previous && previous.flowId === line.flowId;
+    const joinedHyphen = sameFlow && /[A-Za-z]-$/.test(previous.text.trimEnd()) && /^[A-Za-z]/.test(line.text.trimStart());
+    if (joinedHyphen) {
+      text = text.slice(0, -1);
+      if (boxes.length) boxes[boxes.length - 1].end = Math.min(boxes[boxes.length - 1].end, text.length);
+    } else if (previous) {
+      text += sameFlow ? "\n" : "\n\n";
     }
-    let lineCursor = 0;
-    for (const [boxIndex, box] of line.boxes.entries()) {
+    const offset = text.length;
+    let cursor = 0;
+    for (const box of line.boxes) {
       const raw = box.text.trim();
-      if (!raw) {
-        continue;
-      }
-      const isHyphenatedLineEnd = boxIndex === line.boxes.length - 1 && /[A-Za-z]-$/.test(raw);
-      const indexText = isHyphenatedLineEnd ? raw.slice(0, -1) : raw;
-      const itemIndex = line.text.indexOf(raw, lineCursor);
-      const itemStart = textCursor + (itemIndex >= 0 ? itemIndex : lineCursor);
-      const itemEnd = itemStart + indexText.length;
-      lineCursor = (itemIndex >= 0 ? itemIndex : lineCursor) + raw.length;
-      boxes.push({
-        ...box,
-        text: raw,
-        start: itemStart,
-        end: itemEnd,
-      });
+      if (!raw) continue;
+      const match = line.text.indexOf(raw, cursor);
+      const start = match >= 0 ? match : cursor;
+      boxes.push({ ...box, text: raw, start: offset + start, end: offset + start + raw.length, flowId: line.flowId });
+      cursor = start + raw.length;
     }
-    textCursor += line.text.length - (/[A-Za-z]-$/.test(line.text.trimEnd()) ? 1 : 0);
+    text += line.text;
   }
   return { text, boxes };
 }
 
 export function dehyphenateLineBreaks(text: string) {
-  return text
-    .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
-    .replace(/\s*\n\s*/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return text.split(/\n{2,}/).map((block) => block
+    .replace(/([A-Za-z])-[ \t]*\n[ \t]*([A-Za-z])/g, "$1$2")
+    .replace(/\s+/g, " ").trim()).filter(Boolean).join("\n\n");
 }
 
 function pdfTextItemPosition(
@@ -491,12 +421,7 @@ export function pageTextFromPdfItems(
 ) {
   const { text } = textBoxesFromPdfItems(items, viewport, scale, layoutMode);
   const dehyphenated = dehyphenateLineBreaks(text);
-  const formulas = formulaTextFromPdfItems(items, viewport);
-  const formulaText = formulas.length ? ` Extracted equations: ${formulas.join("; ")}` : "";
-  if (dehyphenated) {
-    return `${dehyphenated}${formulaText}`.trim();
-  }
-  return `${items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim()}${formulaText}`.trim();
+  return dehyphenated || items.map((item) => item.str ?? "").join(" ").replace(/\s+/g, " ").trim();
 }
 
 function cleanPdfTitleText(value: string) {
@@ -530,7 +455,7 @@ export function inferPdfTitleFromPdfItems(
   viewport: { width: number; height: number; transform: number[] },
   scale: number,
 ) {
-  const lines = textLinesFromBoxes(pdfItemTextBoxes(items, viewport, scale), "single")
+  const lines = visualTextLinesFromBoxes(pdfItemTextBoxes(items, viewport, scale))
     .filter((line) => line.rect.top < viewport.height * 0.45)
     .filter((line) => !isWeakPdfTitleCandidate(line.text));
   if (lines.length === 0) {
@@ -737,6 +662,17 @@ export function selectedSpansFromGesture(
   if (dragDistance < 5) {
     return [];
   }
+  if (spans.some((span) => span.dataset.flowId !== undefined)) {
+    const items = spans.map((span, order) => ({ span, order, rect: span.getBoundingClientRect(), column: 0, fullWidth: false }))
+      .filter((item) => item.rect.width > 1 && item.rect.height > 1);
+    const start = closestSpanToPoint(items, gesture.startX, gesture.startY);
+    const end = closestSpanToPoint(items, gesture.endX, gesture.endY);
+    if (!start || !end) return [];
+    if (start.span.dataset.flowId === end.span.dataset.flowId) {
+      return spanRangeWithinVisualLines(items.filter((item) => item.span.dataset.flowId === start.span.dataset.flowId), start, end);
+    }
+    return items.filter((item) => item.order >= Math.min(start.order, end.order) && item.order <= Math.max(start.order, end.order));
+  }
   const pageBounds = page.getBoundingClientRect();
   const columnInfo = layoutMode !== "single" ? textLayerColumnInfo(spans, pageBounds, layoutMode) : null;
   const splitX = columnInfo?.splitX ?? pageBounds.left + pageBounds.width / 2;
@@ -855,7 +791,8 @@ export function selectionFromTextLayer(
     return null;
   }
   const pageBounds = page.getBoundingClientRect();
-  const columnInfo = layoutMode !== "single" ? textLayerColumnInfo(spans, pageBounds, layoutMode) : null;
+  const hasFlows = spans.some((span) => span.dataset.flowId !== undefined);
+  const columnInfo = !hasFlows && layoutMode !== "single" ? textLayerColumnInfo(spans, pageBounds, layoutMode) : null;
   const anchorSpan = closestTextLayerSpan(selection?.anchorNode ?? null);
   const anchorColumn = columnInfo && anchorSpan ? columnInfo.columnFor(anchorSpan.getBoundingClientRect()) : null;
   const lockedColumn = columnInfo && anchorColumn !== null ? anchorColumn : null;
@@ -935,7 +872,7 @@ export function pdfItemTextBoxes(
     if (!isMostlyHorizontalTextTransform(transform)) {
       continue;
     }
-    const fontHeight = Math.max(8, Math.hypot(transform[2], transform[3]));
+    const fontHeight = Math.max(1, Math.hypot(transform[2], transform[3]));
     const fallbackWidth = Math.max(8, raw.length * fontHeight * 0.52);
     boxes.push({
       text: raw,
@@ -960,173 +897,11 @@ export function inferTextLayoutModeFromBoxes(boxes: TextLayerBox[]): DocumentTex
 }
 
 export function inferPageTextLayoutFromBoxes(boxes: TextLayerBox[]): PageTextLayoutInference {
-  const lines = textLinesFromBoxes(boxes, "single");
-  if (lines.length < 10) {
-    return { mode: "single", confidence: 0.52, reason: "too few text lines for a confident column split" };
-  }
-  const boxLeft = quantileNumber(boxes.map((box) => box.rect.left), 0.02);
-  const boxRight = quantileNumber(boxes.map((box) => box.rect.left + box.rect.width), 0.98);
-  const minLeft = Math.min(boxLeft, Math.min(...lines.map((line) => line.rect.left)));
-  const maxRight = Math.max(boxRight, Math.max(...lines.map(lineRight)));
-  const span = Math.max(1, maxRight - minLeft);
-  const contentTop = Math.min(...lines.map((line) => line.rect.top));
-  const contentBottom = Math.max(...lines.map(lineBottom));
-  const contentHeight = Math.max(1, contentBottom - contentTop);
-  const fontMedian = medianNumber(lines.map((line) => line.fontSize).filter((size) => size > 0));
-  const narrowLimit = span * 0.68;
-  const candidateLines = lines.filter((line) => {
-    const text = line.text.trim();
-    const center = lineCenterX(line);
-    const y = lineCenterY(line);
-    const widthRatio = line.rect.width / span;
-    const topRatio = (y - contentTop) / contentHeight;
-    const topDisplayText = topRatio < 0.34 && line.fontSize > Math.max(fontMedian * 1.28, fontMedian + 2.4);
-    const centeredHeader = topRatio < 0.28 && widthRatio > 0.48 && Math.abs(center - (minLeft + span / 2)) < span * 0.18;
-    return (
-      text.length >= 3 &&
-      line.rect.width >= Math.max(22, line.fontSize * 2.6) &&
-      line.rect.width < narrowLimit &&
-      center > minLeft + span * 0.04 &&
-      center < maxRight - span * 0.04 &&
-      !topDisplayText &&
-      !centeredHeader
-    );
-  });
-  const lowerStart = contentTop + contentHeight * 0.30;
-  const lowerCandidateLines = candidateLines.filter((line) => lineCenterY(line) >= lowerStart);
-  const lowerBodyLines =
-    lowerCandidateLines.length >= Math.min(8, candidateLines.length) ? lowerCandidateLines : candidateLines;
-  if (lowerBodyLines.length < 8) {
-    return {
-      mode: "single",
-      confidence: boxes.length > 80 ? 0.62 : 0.55,
-      reason: `few body-column candidates (${lowerBodyLines.length})`,
-    };
-  }
-
-  function evaluateCandidates(bodyLines: TextLine[], label: string) {
-    const centers = bodyLines.map(lineCenterX).sort((a, b) => a - b);
-    let bestGap = 0;
-    let splitX = minLeft + span / 2;
-    for (let index = 1; index < centers.length; index += 1) {
-      const gap = centers[index] - centers[index - 1];
-      const candidateSplit = (centers[index - 1] + centers[index]) / 2;
-      const splitRatio = (candidateSplit - minLeft) / span;
-      if (splitRatio >= 0.32 && splitRatio <= 0.68 && gap > bestGap) {
-        bestGap = gap;
-        splitX = candidateSplit;
-      }
-    }
-    const leftLines = bodyLines.filter((line) => lineCenterX(line) < splitX);
-    const rightLines = bodyLines.length - leftLines.length;
-    const leftCount = leftLines.length;
-    const rightCount = rightLines;
-    const balance = rightCount > 0 ? Math.min(leftCount, rightCount) / Math.max(leftCount, rightCount) : 0;
-    const rowTolerance = Math.max(6, fontMedian * 0.85);
-    const rows: Array<{ top: number; bottom: number; columns: Set<number> }> = [];
-    for (const line of [...bodyLines].sort((a, b) => lineCenterY(a) - lineCenterY(b))) {
-      const y = lineCenterY(line);
-      const column = lineCenterX(line) < splitX ? 0 : 1;
-      let row = rows.find((item) => y >= item.top - rowTolerance && y <= item.bottom + rowTolerance);
-      if (!row) {
-        row = { top: line.rect.top, bottom: lineBottom(line), columns: new Set<number>() };
-        rows.push(row);
-      }
-      row.top = Math.min(row.top, line.rect.top);
-      row.bottom = Math.max(row.bottom, lineBottom(line));
-      row.columns.add(column);
-    }
-    const pairedRows = rows.filter((row) => row.columns.size >= 2).length;
-    const pairedRatio = rows.length ? pairedRows / rows.length : 0;
-    const bandTop = Math.min(...bodyLines.map((line) => line.rect.top));
-    const bandBottom = Math.max(...bodyLines.map(lineBottom));
-    const verticalCoverage = (bandBottom - bandTop) / contentHeight;
-    const bodyBoxes = bodyLines.flatMap((line) => line.boxes).filter((box) => {
-      const text = box.text.trim();
-      if (!text || box.rect.width <= 1 || box.rect.height <= 1) {
-        return false;
-      }
-      const center = box.rect.left + box.rect.width / 2;
-      const y = box.rect.top + box.rect.height / 2;
-      return (
-        y >= bandTop - rowTolerance * 2 &&
-        y <= bandBottom + rowTolerance * 2 &&
-        center > minLeft + span * 0.035 &&
-        center < maxRight - span * 0.035 &&
-        box.fontSize <= Math.max(fontMedian * 1.65, fontMedian + 5)
-      );
-    });
-    const boxCenters = bodyBoxes.map((box) => box.rect.left + box.rect.width / 2).sort((a, b) => a - b);
-    let bestBoxGap = 0;
-    for (let index = 1; index < boxCenters.length; index += 1) {
-      const gap = boxCenters[index] - boxCenters[index - 1];
-      if (gap > bestBoxGap) {
-        bestBoxGap = gap;
-      }
-    }
-    const gutterWidth = Math.max(24, span * 0.045);
-    const gutterHits = bodyBoxes.filter(
-      (box) => box.rect.left <= splitX + gutterWidth / 2 && box.rect.left + box.rect.width >= splitX - gutterWidth / 2,
-    ).length;
-    const gutterDensity = bodyBoxes.length ? gutterHits / bodyBoxes.length : 1;
-    const medianLineWidth = medianNumber(bodyLines.map((line) => line.rect.width)) / span;
-    const hasLineColumnGap = bestGap > Math.max(42, span * 0.08);
-    const hasHugeLineGap = bestGap > Math.max(72, span * 0.135);
-    const hasBoxColumnGap = bestBoxGap > Math.max(30, span * 0.055);
-    const hasUsefulGutter = gutterDensity < 0.24 || (hasHugeLineGap && balance >= 0.5 && gutterDensity < 0.3);
-    const hasPairedRows = pairedRows >= 3 && pairedRatio >= 0.14;
-    const hasEnoughSideEvidence = Math.min(leftCount, rightCount) >= 4 || (hasPairedRows && Math.min(leftCount, rightCount) >= 3);
-    const hasEnoughVerticalEvidence = verticalCoverage >= 0.18 || pairedRows >= 4 || bodyLines.length >= 16;
-    const isBalanced = balance >= 0.34 || (hasPairedRows && balance >= 0.24);
-    const narrowEnough = medianLineWidth < 0.56;
-    const twoColumn =
-      hasEnoughSideEvidence &&
-      hasEnoughVerticalEvidence &&
-      isBalanced &&
-      narrowEnough &&
-      hasUsefulGutter &&
-      (hasLineColumnGap || hasPairedRows || (hasHugeLineGap && hasBoxColumnGap));
-    const lineGapScore = bestGap / Math.max(1, span);
-    const boxGapScore = bestBoxGap / Math.max(1, span);
-    const twoColumnScore =
-      (hasLineColumnGap ? 0.24 : 0) +
-      (hasHugeLineGap ? 0.1 : 0) +
-      (hasBoxColumnGap ? 0.1 : 0) +
-      (hasUsefulGutter ? 0.14 : 0) +
-      (hasPairedRows ? Math.min(0.18, pairedRows * 0.035 + pairedRatio * 0.12) : 0) +
-      (hasEnoughVerticalEvidence ? 0.08 : 0) +
-      (narrowEnough ? 0.08 : 0) +
-      Math.min(0.18, balance * 0.18) +
-      Math.min(0.1, Math.max(lineGapScore, boxGapScore) * 0.65);
-    return {
-      label,
-      twoColumn,
-      score: twoColumnScore,
-      leftCount,
-      rightCount,
-      balance,
-      bestGap,
-      bestBoxGap,
-      gutterDensity,
-      pairedRows,
-      pairedRatio,
-      verticalCoverage,
-      bodyLineCount: bodyLines.length,
-    };
-  }
-
-  const allEvidence = evaluateCandidates(candidateLines, "all");
-  const lowerEvidence = evaluateCandidates(lowerBodyLines, "body");
-  const evidence = lowerEvidence.score >= allEvidence.score ? lowerEvidence : allEvidence;
-  const mode = evidence.twoColumn ? "two-column" : "single";
-  const confidence =
-    mode === "two-column"
-      ? Math.max(0.68, Math.min(0.98, evidence.score))
-      : Math.max(0.55, Math.min(0.94, 1 - evidence.score * 0.62 + Math.min(0.06, evidence.gutterDensity)));
+  const layout = readingOrderForLines(visualTextLinesFromBoxes(boxes));
   return {
-    mode,
-    confidence: Math.round(confidence * 100) / 100,
-    reason: `${evidence.label} lines ${evidence.leftCount}/${evidence.rightCount}, balance ${evidence.balance.toFixed(2)}, paired ${evidence.pairedRows}, vertical ${(evidence.verticalCoverage * 100).toFixed(1)}%, line gap ${Math.round(evidence.bestGap)}, box gap ${Math.round(evidence.bestBoxGap)}, gutter ${(evidence.gutterDensity * 100).toFixed(1)}%`,
+    mode: layout.columns > 1 ? "two-column" : "single",
+    confidence: layout.columns > 1 ? 0.95 : boxes.length > 30 ? 0.9 : 0.6,
+    reason: `regional reading order: ${layout.columns} columns, ${layout.flows} regions`,
   };
 }
 
@@ -1143,7 +918,15 @@ export function inferPageTextLayoutFromPdfItems(
   viewport: { width: number; height: number; transform: number[] },
   scale: number,
 ): PageTextLayoutInference {
-  return inferPageTextLayoutFromBoxes(pdfItemTextBoxes(items, viewport, scale));
+  return inferPageTextLayoutFromBoxes(pdfItemTextBoxes(items, unscaledViewport(viewport, scale), 1));
+}
+
+function unscaledViewport(viewport: PdfTextViewport, scale: number): PdfTextViewport {
+  return {
+    width: viewport.width / scale,
+    height: viewport.height / scale,
+    transform: viewport.transform.map((value) => Math.round(value / scale * 1e6) / 1e6),
+  };
 }
 
 export function textBoxesFromPdfItems(
@@ -1152,6 +935,8 @@ export function textBoxesFromPdfItems(
   scale: number,
   layoutMode: DocumentTextLayoutMode | "auto" = "auto",
 ) {
-  const boxes = pdfItemTextBoxes(items, viewport, scale);
-  return textAndBoxesFromOrderedLines(textLinesFromBoxes(boxes, layoutMode));
+  const boxes = pdfItemTextBoxes(items, unscaledViewport(viewport, scale), 1);
+  const ordered = textAndBoxesFromOrderedLines(textLinesFromBoxes(boxes, layoutMode));
+  return { text: ordered.text, boxes: ordered.boxes.map((box) => ({ ...box, fontSize: box.fontSize * scale,
+    rect: { left: box.rect.left * scale, top: box.rect.top * scale, width: box.rect.width * scale, height: box.rect.height * scale } })) };
 }

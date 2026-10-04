@@ -1,5 +1,5 @@
 import type { CSSProperties, PointerEvent } from "react";
-import { BookOpen, Bookmark, ChevronLeft, Eraser, Grid2X2, Highlighter, Languages, List, Maximize2, Sparkles, X } from "./icons";
+import { BookOpen, Bookmark, ChevronLeft, Eraser, Grid2X2, Highlighter, Languages, List, Maximize2, MoreVertical, Sparkles, X } from "./icons";
 import { InlineMathText, OutlineTitleText } from "./FormattedAiText";
 import type { DocumentRecord, PageRecord } from "../types";
 import type { OutlineRow } from "../lib/outlines";
@@ -105,7 +105,9 @@ export function ReaderActionPalette(props: {
   wordListCount: number;
   missingWordCount: number;
   readerBookmarkCount: number;
+  hasSentenceActions: boolean;
   onAddReaderBookmark: () => void;
+  onOpenSentenceActions: () => void;
   onSelectHighlightColor: (color: string) => void;
   onSelectEraser: () => void;
   onStartRegionExplain: () => void;
@@ -151,6 +153,16 @@ export function ReaderActionPalette(props: {
         <Maximize2 size={17} />
       </button>
       <button
+        className="floating-tool"
+        title={props.ui.sentenceActions}
+        data-tooltip={props.ui.sentenceActions}
+        aria-label={props.ui.sentenceActions}
+        disabled={!props.hasSentenceActions}
+        onClick={props.onOpenSentenceActions}
+      >
+        <MoreVertical size={17} />
+      </button>
+      <button
         className="floating-tool with-badge"
         title={props.ui.addReaderBookmark}
         data-tooltip={props.ui.addReaderBookmark}
@@ -193,6 +205,7 @@ export function WordMeaningPopup(props: {
   loading: boolean;
   onClose: () => void;
   onAdjust: () => void;
+  onOpenSentenceActions: () => void;
   onDeleteEntry: (entryId: string) => void;
 }) {
   const top = clampNumber(props.popup.y, 72, Math.max(120, window.innerHeight - 220));
@@ -239,6 +252,12 @@ export function WordMeaningPopup(props: {
         ))}
       </div>
       <div className="word-meaning-actions">
+        {props.popup.sourceSentenceId && (
+          <button type="button" onClick={props.onOpenSentenceActions}>
+            <List size={14} />
+            <span>{props.ui.sentenceActions}</span>
+          </button>
+        )}
         <button type="button" onClick={props.onAdjust}>
           <Sparkles size={14} />
           <span>{props.ui.adjustWordMeaning}</span>

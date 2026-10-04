@@ -3,15 +3,10 @@ import type { AiResultRecord, AiTaskType, AppStateRecord, DocumentRecord, PageRe
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import { normalizeAiProviderKind } from "../lib/ai";
 import { aiOutlineVersion, documentOutlineVersionSettingKey, hasFreshPendingOutlineResult, outlinePagesForAi, parseAiOutlineRows } from "../lib/outlines";
-import {
-  pageTextLayoutConfidenceFromSettings,
-  pageTextLayoutAiVersion,
-  pageTextLayoutAiVersionSettingKey,
-  pageTextLayoutModeFromSettings,
-  pageTextLayoutSourceSettingKey,
-} from "../lib/readerSettings";
+
 import {
   hasCompleteTranslationResultForPage,
+  hasFailedTranslationResultForPage,
   hasTranslationRequestForPage,
   isPageFullyTranslated,
   pendingTranslationResultForPage,
@@ -72,7 +67,6 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     translationEligiblePages,
     incompleteTranslationRetriesRef,
     outlineRequestsRef,
-    documentLayoutRequestsRef,
     setSelectedSentenceId,
     setWordPopup,
     setSelectionToolbar,
@@ -83,7 +77,6 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     ensureActivePages,
     extractOrderedPagesFromPdf,
     replaceExtractedPages,
-    saveDocumentLayoutFromResult,
     runAutoHighlightForCurrentPage,
     patchState,
     agentParallelTaskLimit,
@@ -122,7 +115,8 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
         .filter((page) => page.text.length >= 12 && translationEligiblePages.has(page.pageNumber))
         .sort((a, b) => a.pageNumber - b.pageNumber)
         .flatMap((page) => {
-          if (!hasTranslationRequestForPage(activeAiResults, page, targetLanguage)) {
+          if (!hasTranslationRequestForPage(activeAiResults, page, targetLanguage) &&
+              !hasFailedTranslationResultForPage(activeAiResults, page, targetLanguage)) {
             return [{ page, force: false }];
           }
           if (
@@ -201,80 +195,6 @@ export function useReaderAutomation(input: ReaderAutomationInput) {
     };
   }, [activeDocument?.id, activeDocument?.pageCount, pdfDocument, activePages.length, activeAiResults, state.settings]);
 
-  useEffect(() => {
-    if (!activeDocument || activePages.length === 0 || normalizeAiProviderKind(state.settings.aiProvider) === "local-draft") {
-      return;
-    }
-    const documentId = activeDocument.id;
-    const versionKey = pageTextLayoutAiVersionSettingKey(documentId);
-    const versionCurrent = state.settings[versionKey] === pageTextLayoutAiVersion;
-    const hasPendingLayout = activeAiResults.some(
-      (result) => result.taskType.toString() === "classifyDocumentLayout" && result.status === "pending",
-    );
-    if (versionCurrent || hasPendingLayout || documentLayoutRequestsRef.current.has(documentId)) {
-      return;
-    }
-    const layoutCandidates = activePages
-      .map((page) => {
-        const mode = pageTextLayoutModeFromSettings(state.settings, documentId, page.pageNumber);
-        const confidence = pageTextLayoutConfidenceFromSettings(state.settings, documentId, page.pageNumber);
-        const source = state.settings[pageTextLayoutSourceSettingKey(documentId, page.pageNumber)] || "";
-        return {
-          page: page.pageNumber,
-          mode: mode || "unknown",
-          confidence,
-          reason: source === "ai" ? "already AI-classified" : "local geometry confidence below threshold",
-          pageRecord: page,
-          source,
-        };
-      })
-      .filter((candidate) => candidate.source !== "ai" && (candidate.mode === "unknown" || candidate.confidence < 0.7))
-      .slice(0, 8);
-    if (layoutCandidates.length === 0) {
-      patchState((draft) => {
-        draft.settings[versionKey] = pageTextLayoutAiVersion;
-      });
-      void setSetting(versionKey, pageTextLayoutAiVersion);
-      return;
-    }
-    let cancelled = false;
-    documentLayoutRequestsRef.current.add(documentId);
-    async function queueInitialLayoutClassification() {
-      const samplePages = layoutCandidates
-        .map((candidate) => candidate.pageRecord)
-        .filter((page) => page.text.trim().length > 80);
-      if (samplePages.length === 0 || cancelled) {
-        documentLayoutRequestsRef.current.delete(documentId);
-        return;
-      }
-      const queued = await queueTask(
-        "classifyDocumentLayout",
-        {
-          pages: samplePages,
-          layoutCandidates: layoutCandidates.map(({ pageRecord, ...candidate }) => candidate),
-        },
-        { silent: true, keepPanel: true },
-      );
-      if (cancelled) {
-        return;
-      }
-      if (!queued) {
-        documentLayoutRequestsRef.current.delete(documentId);
-        return;
-      }
-      patchState((draft) => {
-        draft.settings[versionKey] = pageTextLayoutAiVersion;
-      });
-      await setSetting(versionKey, pageTextLayoutAiVersion);
-      if (queued.status !== "pending") {
-        await saveDocumentLayoutFromResult(queued);
-      }
-    }
-    void queueInitialLayoutClassification();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeDocument?.id, activePages.length, activeAiResults, state.settings.aiProvider, state.settings]);
 
   useEffect(() => {
     if (state.settings.autoHighlight !== "true" || !activeDocument || !pdfDocument) {

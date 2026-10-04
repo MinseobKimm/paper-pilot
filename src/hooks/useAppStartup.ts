@@ -4,7 +4,8 @@ import { normalizeAiProviderKind } from "../lib/ai";
 import { selectedAiModel, selectedCodexReasoningEffort, isKnownUnsupportedCodexModel } from "../lib/aiPreferences";
 import { initialState, wordMeaningLookupEnabled } from "../lib/appState";
 import { isUnsafeGeneratedHref } from "../lib/linkPreviews";
-import { getAgentProviderStatus, loadAppState, setSetting } from "../lib/tauri";
+import { documentAutoTranslateSettingKey, documentWordMeaningLookupSettingKey } from "../lib/readerSettings";
+import { getAgentProviderStatus, loadAppState, setSetting, setSettings } from "../lib/tauri";
 import { translationLanguageOption } from "../lib/uiStrings";
 
 type AppStartupInput = {
@@ -12,10 +13,11 @@ type AppStartupInput = {
   setActiveDocumentId: (id: string | null) => void;
   setAgentStatuses: (statuses: Partial<Record<AiProviderKind, AgentProviderStatus>>) => void;
   showToast: (message: string, kind?: "info" | "error") => void;
+  onLoaded?: () => void;
 };
 
 export function useAppStartup(input: AppStartupInput) {
-  const { setState, setActiveDocumentId, setAgentStatuses, showToast } = input;
+  const { setState, setActiveDocumentId, setAgentStatuses, showToast, onLoaded } = input;
   useEffect(() => {
     const blockUnsafeGeneratedNavigation = (event: MouseEvent) => {
       if (!(event.target instanceof Element)) {
@@ -38,7 +40,7 @@ export function useAppStartup(input: AppStartupInput) {
   useEffect(() => {
     let mounted = true;
     loadAppState()
-      .then((loaded) => {
+      .then(async (loaded) => {
         if (!mounted) {
           return;
         }
@@ -59,21 +61,37 @@ export function useAppStartup(input: AppStartupInput) {
         settings.claudeModel = settings.claudeModel || (normalizedProvider === "claude-code" ? settings.aiModel || "" : "");
         settings.autoHighlight = "false";
         settings.wordMeaningLookupEnabled = wordMeaningLookupEnabled(settings) ? "true" : "false";
+        const migratedSettings: Array<[string, string]> = [];
+        for (const existingDocument of loaded.documents) {
+          const autoKey = documentAutoTranslateSettingKey(existingDocument.id);
+          const wordKey = documentWordMeaningLookupSettingKey(existingDocument.id);
+          if (!(autoKey in settings)) {
+            settings[autoKey] = settings.autoTranslate === "true" ? "true" : "false";
+            migratedSettings.push([autoKey, settings[autoKey]]);
+          }
+          if (!(wordKey in settings)) {
+            settings[wordKey] = settings.wordMeaningLookupEnabled;
+            migratedSettings.push([wordKey, settings[wordKey]]);
+          }
+        }
+        if (migratedSettings.length > 0) {
+          try {
+            await setSettings(migratedSettings);
+          } catch (error) {
+            showToast(String(error), "error");
+          }
+          if (!mounted) return;
+        }
         settings.aiModel = selectedAiModel(settings);
         if (settings.aiProvider !== normalizedProvider) {
           settings.aiProvider = normalizedProvider;
           void setSetting("aiProvider", normalizedProvider).catch((error) => showToast(String(error), "error"));
         }
-        if (loaded.settings.autoTranslateAutostartMigrated !== "true") {
-          settings.autoTranslate = "true";
-          settings.autoTranslateAutostartMigrated = "true";
-          void setSetting("autoTranslate", "true").catch((error) => showToast(String(error), "error"));
-          void setSetting("autoTranslateAutostartMigrated", "true").catch((error) => showToast(String(error), "error"));
-        }
         setState({ ...initialState, ...loaded, settings });
         if (loaded.documents.length > 0) {
           setActiveDocumentId(loaded.documents[0].id);
         }
+        onLoaded?.();
       })
       .catch((error) => showToast(String(error), "error"));
     return () => {

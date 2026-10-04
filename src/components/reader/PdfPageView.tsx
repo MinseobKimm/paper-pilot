@@ -310,8 +310,7 @@ export function PdfPageView(props: PdfPageViewProps) {
       const content = await page.getTextContent();
       const layoutInference = inferPageTextLayoutFromPdfItems(content.items, viewport, props.zoom);
       props.onTextLayoutReady(props.pageNumber, layoutInference);
-      const effectiveTextLayoutMode = props.textLayoutMode || layoutInference.mode || "auto";
-      const extractedTextLayer = textBoxesFromPdfItems(content.items, viewport, props.zoom, effectiveTextLayoutMode);
+      const extractedTextLayer = textBoxesFromPdfItems(content.items, viewport, props.zoom);
       const text =
         dehyphenateLineBreaks(extractedTextLayer.text) ||
         extractedTextLayer.text ||
@@ -350,6 +349,7 @@ export function PdfPageView(props: PdfPageViewProps) {
           span.style.height = `${sourceBox.rect.height}px`;
           span.style.fontFamily = fontFamily;
           span.dataset.text = segment.text;
+          span.dataset.flowId = String(sourceBox.flowId ?? 0);
           if (segment.sentenceId) {
             span.dataset.sentenceId = segment.sentenceId;
             span.classList.add("sentence-token");

@@ -33,24 +33,6 @@ export function isAgentProvider(kind: string | null | undefined): boolean {
   return normalizeAiProviderKind(kind) !== "local-draft";
 }
 
-function textFromUnknownRows(value: unknown, key: string): string {
-  if (!Array.isArray(value)) {
-    return "";
-  }
-  return value
-    .map((item) => (item && typeof item === "object" && typeof (item as Record<string, unknown>)[key] === "string" ? (item as Record<string, string>)[key] : ""))
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function effectiveInputTokens(prompt: string, task: AiTask): number {
-  let sourceText = "";
-  if (task.taskType === "chatWithPaper" && ["auto", "fast"].includes(String(task.payload.askMode ?? ""))) {
-    sourceText = textFromUnknownRows(task.payload.pages, "text");
-  }
-  return estimateTokens([prompt, sourceText].filter(Boolean).join("\n\n"));
-}
-
 export class AgentCliProvider implements AiProvider {
   constructor(
     private readonly bridgePath: string,
@@ -59,7 +41,7 @@ export class AgentCliProvider implements AiProvider {
 
   async run(task: AiTask): Promise<AiResultRecord> {
     const prompt = buildAiPrompt(task);
-    const inputTokens = effectiveInputTokens(prompt, task);
+    const inputTokens = estimateTokens(prompt);
     const providerSessionId =
       typeof task.payload.providerSessionId === "string" ? task.payload.providerSessionId : undefined;
     const model = typeof task.payload.model === "string" ? task.payload.model : undefined;
@@ -110,7 +92,7 @@ export class LocalDraftProvider implements AiProvider {
       taskType: task.taskType,
       inputText: inputTextFor(task.payload),
       outputText: prependTokenEstimate(outputText, {
-        inputTokens: effectiveInputTokens(prompt, task),
+        inputTokens: estimateTokens(prompt),
         outputTokens: estimateTokens(outputText),
       }),
       status: "complete",

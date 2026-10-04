@@ -19,7 +19,7 @@ export type TranslationPair = {
 
 export type TranslationUnit = SentenceUnit & {
   translation: string;
-  status: "pending" | "complete" | "missing";
+  status: "pending" | "complete" | "missing" | "failed";
   aiSegment?: boolean;
   sourceIds?: string[];
 };
@@ -50,6 +50,8 @@ function structuralSentenceChunks(text: string) {
 }
 
 export function smartSentenceParts(text: string): string[] {
+  const regions = (text || "").split(/\n{2,}/).filter((part) => part.trim());
+  if (regions.length > 1) return regions.flatMap(smartSentenceParts);
   const normalized = (text || "").replace(/\s+/g, " ").trim();
   if (!normalized) {
     return [];
@@ -269,7 +271,7 @@ export function parseTranslationMap(outputText: string): Map<string, string> {
 }
 
 
-const translationInputMarkerPattern = /^\[translation:\s*([^\]]+)\]\n/i;
+const translationInputMarkerPattern = /^\[translation:\s*([^;\]]+?)(?:;\s*page\s+(\d+))?\]\r?\n/i;
 
 export function translationInputText(result: AiResultRecord) {
   return result.inputText.replace(translationInputMarkerPattern, "");
@@ -277,6 +279,24 @@ export function translationInputText(result: AiResultRecord) {
 
 export function translationInputLanguage(result: AiResultRecord) {
   return result.inputText.match(translationInputMarkerPattern)?.[1]?.trim() || "Korean";
+}
+
+export function translationInputPage(result: AiResultRecord) {
+  const value = result.inputText.match(translationInputMarkerPattern)?.[2];
+  return value ? Number(value) : null;
+}
+
+function outputTranslationPage(result: AiResultRecord) {
+  if (result.status !== "complete") {
+    return null;
+  }
+  const pages = new Set(
+    parseTranslationPairs(result.outputText)
+      .flatMap((pair) => pair.sourceIds ?? [])
+      .map((id) => Number(id.match(/^p(\d+)-s\d+$/)?.[1] ?? 0))
+      .filter((page) => page > 0),
+  );
+  return pages.size === 1 ? [...pages][0] : null;
 }
 
 export function translationResultsForPage(
@@ -287,13 +307,27 @@ export function translationResultsForPage(
   if (!page?.text) {
     return [];
   }
-  return results.filter(
-    (result) =>
-      result.documentId === page.documentId &&
-      result.taskType.toString() === "translatePage" &&
-      normalizeComparable(translationInputText(result)) === normalizeComparable(page.text) &&
-      (!targetLanguage || translationInputLanguage(result) === targetLanguage),
-  );
+  // Region breaks also affect sentence IDs, even when the word sequence stays
+  // the same. Keep those boundaries when deciding whether a cache is reusable.
+  const sourceKey = (text: string) => text.split(/\n\s*\n/)
+    .map((region) => normalizeComparable(region).toLowerCase()).filter(Boolean).join("\n\n");
+  const pageText = sourceKey(page.text);
+  return results.filter((result) => {
+    if (
+      result.documentId !== page.documentId ||
+      result.taskType.toString() !== "translatePage" ||
+      (targetLanguage && translationInputLanguage(result) !== targetLanguage)
+    ) {
+      return false;
+    }
+    const recordedPage = translationInputPage(result) ?? outputTranslationPage(result);
+    const inputText = sourceKey(translationInputText(result));
+    if (recordedPage !== null) {
+      // Sentence IDs are positional and cannot be reused after reading-order changes.
+      return recordedPage === page.pageNumber && inputText === pageText;
+    }
+    return inputText === pageText;
+  });
 }
 
 function isLocalQueuedTranslation(result: AiResultRecord) {
@@ -496,17 +530,22 @@ export function translationUnitsForPage(page: PageRecord | undefined, results: A
     return [];
   }
   const pending = pendingTranslationResultForPage(results, page, targetLanguage);
+  const failed = hasFailedTranslationResultForPage(results, page, targetLanguage);
   const translationMap = mergedTranslationMapForPage(page, results, targetLanguage);
   return sourceUnits.map((unit, index) => ({
     ...unit,
     translation: translationMap.get(unit.id) ?? "",
-    status: translationMap.has(unit.id) ? "complete" : pending ? "pending" : "missing",
+    status: translationMap.has(unit.id) ? "complete" : pending ? "pending" : failed ? "failed" : "missing",
     sourceIds: [unit.id],
   }));
 }
 
 export function hasTranslationRequestForPage(results: AiResultRecord[], page: PageRecord | undefined, targetLanguage?: string) {
   return Boolean(pendingTranslationResultForPage(results, page, targetLanguage) || hasCompleteTranslationResultForPage(results, page, targetLanguage));
+}
+
+export function hasFailedTranslationResultForPage(results: AiResultRecord[], page: PageRecord | undefined, targetLanguage?: string) {
+  return translationResultsForPage(results, page, targetLanguage).some((result) => result.status === "failed");
 }
 
 export function autoHighlightResultsForPage(results: AiResultRecord[], page: PageRecord | undefined) {

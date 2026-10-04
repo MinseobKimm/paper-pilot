@@ -17,6 +17,13 @@ export const readerOutlineOpenSettingKey = "readerOutlineOpen";
 export const readerOutlineCompactSettingKey = "readerOutlineCompact";
 export const readerTranslationPanelOpenSettingKey = "readerTranslationPanelOpen";
 export const readerRightPanelOpenSettingKey = "readerRightPanelOpen";
+export function documentAutoTranslateSettingKey(documentId: string) {
+  return `documentAutoTranslate:${documentId}`;
+}
+
+export function documentWordMeaningLookupSettingKey(documentId: string) {
+  return `documentWordMeaningLookup:${documentId}`;
+}
 export const layoutDefaults = {
   outline: 220,
   translation: 360,

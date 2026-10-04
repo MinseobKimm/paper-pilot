@@ -1,4 +1,5 @@
 import { Bot, Trash2 } from "../icons";
+import { useEffect, useState } from "react";
 import type { AgentProviderStatus, AiProviderKind } from "../../types";
 import { normalizeAiProviderKind } from "../../lib/ai";
 import { aiModelForProvider, codexReasoningEffortOptions, isKnownUnsupportedCodexModel, providerModelOptions, providerModelSettingKey, selectedCodexReasoningEffort } from "../../lib/aiPreferences";
@@ -11,7 +12,18 @@ export function SettingsView(props: {
   runtime: string;
   onChange: (key: string, value: string) => void;
   onResetWorkspace: () => void;
+  onPickObsidianVault: () => Promise<boolean>;
+  onConfigureObsidian: (vaultPath: string, folder: string, enabled: boolean) => Promise<void>;
+  onSyncObsidian: () => Promise<number>;
 }) {
+  const [obsidianFolder, setObsidianFolder] = useState(props.settings.obsidianFolder || "Paper Pilot");
+  const [obsidianMessage, setObsidianMessage] = useState("");
+  useEffect(() => setObsidianFolder(props.settings.obsidianFolder || "Paper Pilot"), [props.settings.obsidianFolder]);
+  const ko = props.uiLanguage === "ko";
+  const runObsidian = async (work: () => Promise<unknown>, success: string) => {
+    try { await work(); setObsidianMessage(success); }
+    catch (error) { setObsidianMessage(String(error)); }
+  };
   const provider = normalizeAiProviderKind(props.settings.aiProvider);
   const providerStatus = props.agentStatuses[provider];
   const claudeMissing = props.agentStatuses["claude-code"]?.installed === false;
@@ -160,6 +172,24 @@ export function SettingsView(props: {
           <span>{props.ui.customPrompt}</span>
           <textarea value={props.settings.customPrompt} onChange={(event) => props.onChange("customPrompt", event.target.value)} />
         </label>
+      </div>
+      <div className="runtime-card obsidian-settings">
+        <div>
+          <strong>{ko ? "Obsidian 노트 자동 연동" : "Obsidian note sync"}</strong>
+          <span>{ko ? "논문 노트를 보관함의 Markdown 파일로 보냅니다." : "Send paper notes to Markdown files in your vault."}</span>
+          <p>{props.settings.obsidianVaultPath || (ko ? "보관함을 선택해 주세요." : "Choose a vault.")}</p>
+          <div className="obsidian-settings-actions">
+            <button type="button" disabled={props.runtime !== "Tauri desktop"} onClick={() => void props.onPickObsidianVault().then((chosen) => { if (chosen) setObsidianMessage(ko ? "보관함을 선택했습니다." : "Vault selected."); }).catch((error) => setObsidianMessage(String(error)))}>{ko ? "보관함 선택" : "Choose vault"}</button>
+            <label><input type="checkbox" checked={props.settings.obsidianEnabled === "true"} disabled={!props.settings.obsidianVaultPath} onChange={(event) => void runObsidian(() => props.onConfigureObsidian(props.settings.obsidianVaultPath || "", obsidianFolder, event.target.checked), ko ? "연동 설정을 저장했습니다." : "Sync setting saved.")} /> {ko ? "자동 연동" : "Automatic sync"}</label>
+            <button type="button" disabled={props.settings.obsidianEnabled !== "true"} onClick={() => void runObsidian(props.onSyncObsidian, ko ? "동기화를 요청했습니다." : "Sync requested.")}>{ko ? "지금 동기화" : "Sync now"}</button>
+          </div>
+          <label className="field"><span>{ko ? "보관함 안의 저장 폴더" : "Folder inside vault"}</span>
+            <input value={obsidianFolder} onChange={(event) => setObsidianFolder(event.target.value)} onBlur={() => {
+              if (obsidianFolder !== (props.settings.obsidianFolder || "Paper Pilot")) void runObsidian(() => props.onConfigureObsidian(props.settings.obsidianVaultPath || "", obsidianFolder, props.settings.obsidianEnabled === "true"), ko ? "저장 폴더를 설정했습니다." : "Folder saved.");
+            }} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+          </label>
+          {obsidianMessage && <small role="status">{obsidianMessage}</small>}
+        </div>
       </div>
       <div className="runtime-card">
         <Bot size={20} />

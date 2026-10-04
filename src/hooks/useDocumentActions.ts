@@ -280,9 +280,9 @@ export function useDocumentActions(input: DocumentActionsInput) {
     }
   }
 
-  function goToLinkPreviewTarget(preview: LinkPreviewState) {
+  async function goToLinkPreviewTarget(preview: LinkPreviewState) {
     if (preview.kind === "external") {
-      if (!openExternalUrl(preview.url)) {
+      if (!await openExternalUrl(preview.url)) {
         showToast(ui.invalidExternalUrl, "error");
       }
       return;
@@ -318,7 +318,6 @@ export function useDocumentActions(input: DocumentActionsInput) {
     patchState((draft) => {
       draft.notes = [note, ...draft.notes.filter((item) => item.id !== note.id)];
     });
-    showToast(ui.noteSaved);
   }
 
   async function deleteActiveNote() {
@@ -336,8 +335,12 @@ export function useDocumentActions(input: DocumentActionsInput) {
     if (!activeDocument) {
       return;
     }
-    const bundle = await exportDocumentJson(activeDocument.id);
-    downloadText(`${activeDocument.title || "paper-pilot-export"}.json`, JSON.stringify(bundle, null, 2));
+    try {
+      const bundle = await exportDocumentJson(activeDocument.id);
+      await downloadText(`${safeFileName(activeDocument.title || "paper-pilot-export")}.json`, JSON.stringify(bundle, null, 2));
+    } catch (error) {
+      showToast(String(error), "error");
+    }
   }
 
   async function exportZip() {

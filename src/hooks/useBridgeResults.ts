@@ -5,7 +5,7 @@ import { saveAiResult, readBridgeResult, startBridgeWorker, upsertAnnotation } f
 import { normalizeComparable } from "../lib/textUtils";
 import { annotationKey } from "../lib/annotationHelpers";
 import { colorForHighlightTag, parseAutoHighlightCandidates } from "../lib/autoHighlights";
-import { chatInputTextWithMode, wordMeaningTaskType } from "../lib/aiResults";
+import { wordMeaningTaskType } from "../lib/aiResults";
 import {
   isStalePendingTranslation,
   stalePendingTranslationMs,
@@ -34,15 +34,7 @@ type BridgeResultsInput = {
   setFloatingResultId: (id: string | null) => void;
   saveWordMeaningsFromResult: (result: AiResultRecord, fallbackWords?: string[]) => Promise<number>;
   saveDocumentLayoutFromResult: (result: AiResultRecord) => Promise<void>;
-  onFastEvidenceInsufficient?: (result: AiResultRecord, metadata: Record<string, unknown>) => Promise<void>;
 };
-
-function savedChatAskMode(taskType: string, value: unknown) {
-  if (taskType !== "chatWithPaper") {
-    return "";
-  }
-  return value === "fast" || value === "deep" || value === "auto" ? value : "";
-}
 
 function aiResultContentMatches(left: AiResultRecord, right: AiResultRecord) {
   return (
@@ -87,7 +79,6 @@ export function useBridgeResults(input: BridgeResultsInput) {
     setFloatingResultId,
     saveWordMeaningsFromResult,
     saveDocumentLayoutFromResult,
-    onFastEvidenceInsufficient,
   } = input;
   async function saveLocalAiResult(result: AiResultRecord) {
     const saved = await saveAiResult(result);
@@ -173,12 +164,9 @@ export function useBridgeResults(input: BridgeResultsInput) {
               : item.providerSessionId;
         const outputText = bridgeResult.output || JSON.stringify(bridgeResult.payload, null, 2);
         const pendingEstimate = parseTokenEstimate(item.outputText);
-        const plannedAskMode =
-          savedChatAskMode(item.taskType.toString(), nestedPayload.askMode) ||
-          savedChatAskMode(item.taskType.toString(), metadata.askMode);
         const nextResult: AiResultRecord = {
           ...item,
-          inputText: plannedAskMode ? chatInputTextWithMode(item.inputText, plannedAskMode) : item.inputText,
+          inputText: item.inputText,
           outputText: prependTokenEstimate(outputText, {
             inputTokens: pendingEstimate.inputTokens,
             outputTokens: estimateTokens(outputText),
@@ -209,9 +197,6 @@ export function useBridgeResults(input: BridgeResultsInput) {
         }
         if (savedResult.taskType.toString() === "classifyDocumentLayout") {
           await saveDocumentLayoutFromResult(savedResult);
-        }
-        if (savedResult.taskType.toString() === "chatWithPaper") {
-          await onFastEvidenceInsufficient?.(savedResult, metadata);
         }
         if (item.taskType.toString() === "translatePage" && bridgeResult.status === "failed") {
           const page = activePages.find((candidate) => normalizeComparable(candidate.text) === normalizeComparable(translationInputText(item)));

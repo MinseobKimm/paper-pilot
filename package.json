@@ -7,10 +7,15 @@
     "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "tsc --noEmit && vite build",
     "test": "npm run build",
-    "setup:python": "python -m pip install -r requirements.txt",
+    "test:chat": "node scripts/test-paper-chat.mjs",
+    "test:layout": "node scripts/test-pdf-layout.mjs",
+    "setup:python": "node scripts/setup-python.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml"
+    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "build:mac": "tauri build --config src-tauri/tauri.macos.conf.json --bundles app && node scripts/sync-mac-app.mjs",
+    "build:mac:dmg": "tauri build --config src-tauri/tauri.macos.conf.json --bundles dmg",
+    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

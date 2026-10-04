@@ -60,7 +60,9 @@ PDF 폴더를 검색 가능한 독해 대기열로 바꿉니다. 논문을 추�
 
 ![Paper Pilot library sidebar](images/usage-library-sidebar.png)
 
-- Add PDF로 선택한 폴더에 논문을 가져옵니다.
+- Add PDF는 Finder의 원본 PDF를 라이브러리에 연결합니다. 앱 내부에 PDF 사본을 만들지 않고 원본을 직접 읽습니다.
+- 원본을 옮기거나 삭제해 경로가 끊기면, 라이브러리에서 열 때 같은 PDF의 새 위치를 선택할 수 있습니다. PDF 폴더는 별도로 백업하세요.
+- 설정에서 로컬 Obsidian 보관함을 선택하고 자동 연동을 켜면 논문마다 Markdown 파일이 만들어집니다. Paper Pilot이 표시한 구역에 노트와 논문 정보를 반영하며, Obsidian에서 자유 작성 구역에 추가한 내용은 보존합니다. 기본값은 꺼짐입니다.
 - 폴더 영역에서 폴더를 만들고, 폴더를 선택해 라이브러리를 필터링합니다.
 - 검색창은 제목, 저자, 연도, 초록, 폴더 맥락으로 논문을 찾습니다.
 - 논문 카드를 열어 Reader로 들어가고, 중요한 논문은 북마크하며, 라이브러리 inspector에서 논문 정보를 수정합니다.
@@ -94,19 +96,14 @@ PDF 폴더를 검색 가능한 독해 대기열로 바꿉니다. 논문을 추�
 
 ## Ask AI 논문 Q&A
 
-Paper Pilot의 논문 채팅은 세 가지 모드로 동작합니다.
+논문 채팅은 항상 선택된 agent에 원본 PDF 경로와 간결한 문서 컨텍스트 팩을 전달합니다. Agent가 원문을 직접 확인하고 페이지를 인용하며, 이전 답변이 논문과 충돌하면 원문을 우선해 정정합니다.
 
-| 모드 | 적합한 질문 | 동작 방식 |
-| --- | --- | --- |
-| `Auto` | agent가 경로를 고르게 하고 싶을 때 | agent가 질문을 영어로 옮기고 Fast 또는 Deep을 선택합니다. |
-| `Fast` | 빠르게 텍스트 근거 기반 답변을 보고 싶을 때 | PaperQA2 기반 근거 검색으로 Reader가 인덱싱한 페이지 텍스트에서 근거를 찾고, 그 근거와 페이지 인용을 바탕으로 답합니다. |
-| `Deep` | 수식, 그림, 표, 알고리즘, 레이아웃, 복잡한 교차 페이지 추론이 필요할 때 | 선택된 agent에 원본 PDF 경로와 compact document context pack을 전달해 논문 전체를 더 깊게 읽습니다. |
+세션은 논문별로 저장되고 앱을 재시작해도 이어집니다. **새 대화**를 누르면 이전 기록을 보존하면서 새 세션을 시작합니다. 시간이나 질문 횟수에 따른 자동 초기화는 없습니다. 저장된 세션이 없거나 유효하지 않으면 새 대화로 한 번 재시도합니다. 현재 논문의 답변을 기다리는 동안 추가 전송과 새 대화는 비활성화됩니다.
 
-Fast 모드는 [PaperQA2](https://github.com/Future-House/paper-qa)를 사용합니다. PaperQA2는 `requirements.txt`의 `paper-qa>=5` Python 패키지로 설치됩니다. Fast 답변은 Paper Pilot이 이미 인덱싱한 페이지 텍스트에 연결되어 페이지 인용을 유지합니다. 근거가 얕다고 판단되면 답변에 그 한계를 표시하고, 더 완전한 독해가 필요할 때 Deep으로 이어갈 수 있습니다.
 
 ## 개인정보와 로컬 상태
 
-Paper Pilot은 로컬 파일과 로컬 상태를 중심으로 동작합니다. AI provider에는 사용자가 실행한 작업에 필요한 맥락만 전달됩니다. 예를 들어 선택 텍스트, 페이지 excerpt, 이미지 crop, Deep 모드의 원본 PDF 경로가 포함될 수 있습니다. 비공개 또는 미공개 논문을 읽을 때는 사용할 provider를 신중하게 선택하세요.
+Paper Pilot은 로컬 파일과 로컬 상태를 중심으로 동작합니다. AI provider에는 사용자가 실행한 작업에 필요한 맥락만 전달됩니다. 예를 들어 선택 텍스트, 페이지 excerpt, 이미지 crop, 논문 채팅의 원본 PDF 경로가 포함될 수 있습니다. 비공개 또는 미공개 논문을 읽을 때는 사용할 provider를 신중하게 선택하세요.
 
 ## 언어 지원
 
@@ -124,6 +121,12 @@ Paper Pilot은 로컬 파일과 로컬 상태를 중심으로 동작합니다. A
 - Python 3.11+
 - 전체 agent 실행을 위한 Codex CLI 또는 Claude Code CLI
 
+macOS에서는 macOS 13.3 이상을 지원합니다. Homebrew를 사용한다면 빌드 도구를 다음과 같이 설치할 수 있습니다.
+
+```bash
+brew install node rust python@3.12
+```
+
 ### Clone
 
 ```bash
@@ -138,11 +141,13 @@ npm install
 npm run setup:python
 ```
 
-`npm run setup:python`은 `python -m pip install -r requirements.txt`를 실행합니다. 이 단계에서 Fast Q&A가 기대하는 PaperQA2가 `paper-qa>=5`로 설치됩니다. Windows에서 Python launcher를 쓰고 있고 Python 3.11 이상으로 연결되어 있다면 `py -3 -m pip install -r requirements.txt`를 사용해도 됩니다.
+`npm run setup:python`은 격리된 Python 환경을 만들고 PaperQA2를 `paper-qa>=5`로 설치합니다. macOS에서는 Finder에서 실행한 앱도 Python을 안정적으로 찾도록 `~/Library/Application Support/local.paper-pilot.reader/python`에 환경을 저장합니다. `requirements.txt`를 변경한 뒤에는 이 명령을 다시 실행하세요.
 
 ## 실행
 
 ### 데스크톱 앱
+
+Mac에서는 프로젝트 루트의 `Paper Pilot Dev.command`를 더블클릭해도 실행할 수 있습니다. 앱이 열리면 실행용 터미널 창은 자동으로 닫히고, 개발 서버는 백그라운드에서 계속 동작합니다. 프런트엔드는 소스 변경 시 바로 갱신되고, Rust 백엔드 변경 시 Tauri가 다시 컴파일합니다. 실행 로그는 `.dev-run/dev.log`에 저장됩니다.
 
 ```bash
 npm run tauri:dev
@@ -163,20 +168,43 @@ npm run build
 npm run tauri:build
 ```
 
+Mac에서 네이티브 앱을 만들고 기본 앱용 `release/Paper Pilot.app`을 업데이트하려면 다음 명령을 실행합니다. 앱이 실행 중이면 종료한 뒤 다시 열어 새 빌드를 사용하세요.
+
+```bash
+npm run build:mac
+```
+
+DMG가 필요하면 `npm run build:mac:dmg`를 별도로 실행합니다.
+
 프로덕션 실행 파일은 아래 경로에 생성됩니다.
 
 ```text
 src-tauri/target/release/
 ```
 
+macOS 결과물은 다음 위치에 생성됩니다.
+
+```text
+release/Paper Pilot.app
+src-tauri/target/release/bundle/macos/Paper Pilot.app
+src-tauri/target/release/bundle/dmg/Paper Pilot_<version>_<architecture>.dmg
+```
+
+`.app`과 `.dmg`는 빌드 시점의 고정본입니다. 소스 수정 사항을 반영하려면 `npm run build:mac`을 다시 실행하세요.
+
+Mac의 기본 PDF 앱으로 사용하려면 Finder에서 PDF 하나를 선택해 `정보 가져오기(⌘I) → 다음으로 열기 → 기타…`에서 `release/Paper Pilot.app`을 선택하고 `모두 변경`을 누릅니다. Finder에서 PDF를 열면 앱의 라이브러리로 가져와 Reader에 표시하고, 이미 가져온 파일이면 기존 항목을 엽니다. 개발용 `.command` 바로가기는 기본 앱 선택 대상이 아닙니다.
+
+로컬 빌드는 ad-hoc 서명을 사용합니다. 다른 Mac에 배포할 때 Gatekeeper 경고를 없애려면 Apple Developer 서명 인증서와 공증 설정이 필요합니다.
+
 ## 체크
 
 ```bash
 npm test
-npm run desktop:check
+npm run desktop:test
+python3 -m unittest discover -s retrieval-adapter -p 'test_*.py'
 ```
 
-`npm test`는 TypeScript와 Vite build check를 실행합니다. `npm run desktop:check`는 Rust/Tauri backend를 검사합니다.
+`npm test`는 TypeScript와 Vite build check를 실행합니다. `npm run desktop:test`는 Rust/Tauri backend 테스트를 실행합니다. Python 명령은 페이지 기반 검색과 로컬 fallback을 검증합니다.
 
 ## Provider 설정
 
@@ -185,7 +213,7 @@ Paper Pilot의 Settings에서 provider를 선택합니다.
 | Provider | 설정 |
 | --- | --- |
 | Local draft | 외부 설정이 필요 없으며 UI smoke check에 유용합니다. |
-| Codex CLI | Codex CLI를 설치하고 `codex`가 `PATH`에 잡히게 하거나 `CODEX_BIN`을 지정합니다. |
+| Codex CLI | Codex CLI를 설치하고 `codex`가 `PATH`에 잡히게 하거나 `CODEX_BIN`을 지정합니다. macOS에서는 Codex 또는 ChatGPT 앱에 포함된 CLI도 자동 감지합니다. |
 | Claude Code | Claude Code를 설치하고 `claude`가 `PATH`에 잡히게 하거나 `CLAUDE_CODE_BIN`을 지정합니다. |
 
 ### Claude Code bridge
@@ -198,7 +226,7 @@ Paper Pilot은 Claude Code의 공식 비대화형 CLI 경로인 `claude --print`
 
 Paper Pilot은 third-party 프로젝트를 의존성으로 통합하며, 각 프로젝트의 라이선스는 이 저장소의 소스 라이선스와 별도로 유지됩니다.
 
-- PaperQA2 / `paper-qa`: Fast Q&A의 evidence retrieval에 사용합니다. Source: [Future-House/paper-qa](https://github.com/Future-House/paper-qa). Package: [paper-qa on PyPI](https://pypi.org/project/paper-qa/). License: Apache License 2.0, copyright FutureHouse.
+- PaperQA2 / `paper-qa`: 독립된 이전 retrieval adapter에 사용합니다. Source: [Future-House/paper-qa](https://github.com/Future-House/paper-qa). Package: [paper-qa on PyPI](https://pypi.org/project/paper-qa/). License: Apache License 2.0, copyright FutureHouse.
 - PaperQA2 연구 인용: Skarlinski et al., "Language agents achieve superhuman synthesis of scientific knowledge", arXiv:2409.13740. PaperQA2 결과에 의존한 작업을 출판하거나 공개할 때는 upstream [CITATION.cff](https://github.com/Future-House/paper-qa/blob/main/CITATION.cff)를 따르세요.
 
 Paper Pilot은 PaperQA2 소스 코드를 vendoring하지 않습니다. 로컬 retrieval adapter를 통해 설치된 Python 패키지를 호출합니다.

@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 from collections import Counter
@@ -198,14 +199,11 @@ async def try_paperqa2_sparse(
     corpus_dir = cache_dir / f"paperqa2-{corpus_key[:16]}"
     corpus_dir.mkdir(parents=True, exist_ok=True)
     docs = Docs()
-    try:
-        settings = Settings(embedding="sparse")
-    except Exception:
-        settings = Settings()
-        try:
-            settings.embedding = "sparse"
-        except Exception:
-            pass
+    settings = Settings(
+        embedding="sparse",
+        parsing={"use_doc_details": False, "disable_doc_valid_check": True, "multimodal": False},
+        answer={"evidence_skip_summary": True, "evidence_k": limit},
+    )
     for chunk in chunks:
         page = int(chunk.get("pageNumber") or 0)
         chunk_id = safe_name(str(chunk.get("chunkId") or f"p{page}"))
@@ -220,10 +218,27 @@ async def try_paperqa2_sparse(
         if hasattr(docs, "aget_evidence"):
             session = await docs.aget_evidence(query, settings=settings)
         else:
-            session = await docs.aquery(query, settings=settings)
+            return None
     except Exception:
         return None
+    # Use structured source metadata; never infer page numbers from generated prose.
+    contexts = getattr(session, "contexts", [])
     extracted = []
+    seen = set()
+    for context in contexts:
+        source = getattr(context, "text", None)
+        text = clean_text(str(getattr(source, "text", "") or ""))
+        doc = getattr(source, "doc", None)
+        page = page_from_text(str(getattr(doc, "citation", "")))
+        if not text or page <= 0 or text in seen:
+            continue
+        seen.add(text)
+        extracted.append({"pageNumber": page, "chunkId": str(getattr(doc, "docname", "")),
+                          "score": float(getattr(context, "score", 1)), "text": text[:1400]})
+        if len(extracted) >= limit:
+            break
+    if extracted:
+        return extracted
     seen = set()
     for text in extract_texts(session):
         clean = clean_text(text)
@@ -271,8 +286,12 @@ def main() -> int:
     evidence = None
     engine = "local-sparse-compatible"
     warnings: list[str] = []
+    os.environ.setdefault("PQA_HOME", str(cache_dir.resolve()))
     if paperqa_available():
-        evidence = asyncio.run(try_paperqa2_sparse(chunks, queries, cache_dir, key, max_chunks))
+        try:
+            evidence = asyncio.run(try_paperqa2_sparse(chunks, queries, cache_dir, key, max_chunks))
+        except Exception as error:
+            warnings.append(f"PaperQA2 retrieval failed ({type(error).__name__}); used compatible sparse scorer.")
         if evidence is not None:
             engine = "paperqa2-sparse"
         else:

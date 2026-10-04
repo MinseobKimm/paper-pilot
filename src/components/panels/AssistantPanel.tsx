@@ -3,8 +3,6 @@ import { Copy, MessageSquareText, Search, Send, Trash2 } from "../icons";
 import { FormattedAiText } from "../FormattedAiText";
 import { aiRuntimeLabel } from "../../lib/aiPreferences";
 import {
-  chatAskModeKind,
-  chatAskModeLabel,
   formatResultTime,
   getReadableAiOutput,
   resultTokenEstimateText,
@@ -16,7 +14,6 @@ import { useUiStrings } from "../../lib/uiStrings";
 import type { AiResultRecord, AiTaskType, AnnotationRecord } from "../../types";
 
 export type ReaderAssistantMode = "study" | "quotes";
-type ChatAskMode = "auto" | "fast" | "deep";
 
 export function AssistantPanel(props: {
   annotations: AnnotationRecord[];
@@ -25,6 +22,7 @@ export function AssistantPanel(props: {
   chatDraft: string;
   setChatDraft: (value: string) => void;
   mode: ReaderAssistantMode;
+  onNewChat: () => Promise<void>;
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
   onHoverSource: (value: string | null) => void;
   onGoToPage: (page: number) => void;
@@ -47,12 +45,14 @@ export function AssistantPanel(props: {
             value={props.chatDraft}
             onChange={props.setChatDraft}
             modelLabel={aiRuntimeLabel(props.settings, ui)}
-            onSend={(askMode) => {
+            onNewChat={props.onNewChat}
+            pending={props.aiResults.some((result) => result.taskType === "chatWithPaper" && result.status === "pending")}
+            onSend={() => {
               const question = props.chatDraft.trim();
               if (!question) {
                 return;
               }
-              props.onQueueTask("chatWithPaper", { question, askMode });
+              props.onQueueTask("chatWithPaper", { question });
               props.setChatDraft("");
             }}
           />
@@ -111,16 +111,7 @@ function ChatThread(props: {
       {chatResults.map((result) => {
         const isPending = result.status === "pending";
         const question = stripChatAskPrefix(result.inputText);
-        const modeKind = chatAskModeKind(result.inputText);
-        const modeLabel = chatAskModeLabel(result.inputText);
-        const pendingAnswer =
-          modeKind === "auto"
-            ? "질문을 분석하는 중입니다"
-            : modeKind === "fast"
-              ? "Fast가 관련 페이지 근거를 찾는 중입니다"
-              : modeKind === "deep"
-                ? "Deep이 원본 PDF를 확인하는 중입니다"
-                : ui.aiPendingAnswer.replace(/[.。]+$/, "");
+        const pendingAnswer = ui.readingOriginalPdf;
         const answer =
           isPending ? pendingAnswer : getReadableAiOutput(result, ui);
         const tokenEstimate = resultTokenEstimateText(result);
@@ -135,7 +126,6 @@ function ChatThread(props: {
               onMouseLeave={() => props.onHoverSource(null)}
             >
               <div className="chat-bubble-head">
-                {modeLabel && <span className={`chat-mode-pill ${modeKind}`}>{modeLabel}</span>}
                 <span className="chat-turn-meta">{[formatResultTime(result.createdAt), tokenEstimate].filter(Boolean).join(" / ")}</span>
                 {!isPending && (
                   <button title={ui.copy} onClick={() => props.onCopy(answer, ui.askAi)}>
@@ -239,32 +229,16 @@ function QuoteCardPanel(props: {
   );
 }
 
-function ChatComposer(props: { value: string; modelLabel: string; onChange: (value: string) => void; onSend: (mode: ChatAskMode) => void }) {
+function ChatComposer(props: { value: string; modelLabel: string; onChange: (value: string) => void; onSend: () => void; onNewChat: () => Promise<void>; pending: boolean }) {
   const ui = useUiStrings();
-  const [askMode, setAskMode] = useState<ChatAskMode>("auto");
+  const [resetting, setResetting] = useState(false);
   const send = () => {
-    props.onSend(askMode);
+    if (!resetting && !props.pending) props.onSend();
   };
   return (
     <div className="assistant-composer">
-      <div className="ask-mode-tabs" role="tablist" aria-label="Ask AI mode">
-        {[
-          ["auto", "Auto"],
-          ["fast", "Fast"],
-          ["deep", "Deep"],
-        ].map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            className={askMode === value ? "active" : ""}
-            aria-selected={askMode === value}
-            onClick={() => setAskMode(value as ChatAskMode)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
       <textarea
+        disabled={resetting}
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
         onKeyDown={(event) => {
@@ -277,8 +251,12 @@ function ChatComposer(props: { value: string; modelLabel: string; onChange: (val
         placeholder={ui.askAnything}
       />
       <div className="composer-footer">
+        <button type="button" disabled={resetting || props.pending} title={ui.newChatHint} onClick={async () => {
+          setResetting(true);
+          try { await props.onNewChat(); } finally { setResetting(false); }
+        }}>{ui.newChat}</button>
         <span className="composer-model-chip">{props.modelLabel}</span>
-        <button className="send-round" title={ui.send} onClick={send}><Send size={15} /></button>
+        <button disabled={resetting || props.pending || !props.value.trim()} className="send-round" title={ui.send} onClick={send}><Send size={15} /></button>
       </div>
     </div>
   );

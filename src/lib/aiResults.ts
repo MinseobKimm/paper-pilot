@@ -125,7 +125,12 @@ export function formatResultTime(value: string) {
 }
 
 export function getReadableAiOutput(result: AiResultRecord, ui: UiStrings = uiStrings.ko) {
-  const text = cleanAiOutput(result.outputText, result.status).replace(/^Token estimate:[^\n]*(?:\n\n)?/, "");
+  const text = cleanAiOutput(result.outputText, result.status)
+    .replace(/^Token estimate:[^\n]*(?:\n\n)?/, "")
+    .replace(/:codex-file-citation\{[^}]*\}/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   if (result.taskType.toString().startsWith("translate") && result.status !== "pending") {
     const translations = parseTranslationLines(text, 0);
     if (translations.length) {
@@ -218,10 +223,20 @@ export function resultPreviewText(result: AiResultRecord, ui: UiStrings = uiStri
   return text;
 }
 
-export function latestProviderSessionId(results: AiResultRecord[], provider: string) {
+export function paperChatExcludedResultIds(value: string | undefined): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function latestProviderSessionId(results: AiResultRecord[], provider: string, excludedResultIds: string[] = []) {
   return (
     results.find(
       (result) =>
+        !excludedResultIds.includes(result.id) &&
         result.status !== "failed" &&
         normalizeAiProviderKind(result.provider ?? provider) === provider &&
         typeof result.providerSessionId === "string" &&

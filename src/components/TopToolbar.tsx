@@ -6,6 +6,8 @@ type TopToolbarProps = {
   mode: WorkspaceMode;
   document: DocumentRecord | null;
   zoom: number;
+  fitAvailable: boolean;
+  fitToWidth: boolean;
   pageCursor: number;
   pageCount: number;
   searchTerm: string;
@@ -18,6 +20,7 @@ type TopToolbarProps = {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onZoomChange: (zoom: number) => void;
+  onFitToWidth: () => void;
   onPageChange: (page: number) => void;
   onSearch: (value: string) => void;
   onTogglePanel: () => void;
@@ -80,11 +83,12 @@ export function TopToolbar(props: TopToolbarProps) {
         {props.mode === "reader" && (
           <>
             <select
-              className="zoom-select"
-              value={zoomPercent}
-              onChange={(event) => props.onZoomChange(Number(event.target.value) / 100)}
+              className={props.fitToWidth ? "zoom-select fit" : "zoom-select"}
+              value={props.fitToWidth ? "fit" : String(zoomPercent)}
+              onChange={(event) => event.target.value === "fit" ? props.onFitToWidth() : props.onZoomChange(Number(event.target.value) / 100)}
               title={props.ui.zoom}
             >
+              {props.fitAvailable && <option value="fit">{props.ui.fitPageWidth} ({zoomPercent}%)</option>}
               {resolvedZoomOptions.map((value) => (
                 <option key={value} value={value}>{value}%</option>
               ))}

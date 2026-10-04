@@ -2,12 +2,16 @@ import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type M
 import { EmptyReader } from "../LibraryViews";
 import { ReaderActionPalette, ReaderOutline } from "../ReaderChrome";
 import { RightPanel, type ReaderAssistantMode } from "../panels/ReaderPanels";
-import { setSetting, upsertAnnotation, deleteCitationCard, upsertCitationCard } from "../../lib/tauri";
-import { sentenceUnitsForPage, translationResultForPage, type TranslationUnit } from "../../lib/translations";
+import { setSettings, upsertAnnotation, deleteCitationCard, upsertCitationCard } from "../../lib/tauri";
+import { sentenceUnitsForPage, translationResultForPage, translationUnitsForPage, type TranslationUnit } from "../../lib/translations";
 import { wordMeaningLookupEnabled } from "../../lib/appState";
 import { wordMeaningLookupEnabledSettingKey, type WordPopup } from "../../lib/wordMeanings";
 import type { DocumentTextLayoutMode, PageTextLayoutInference, SelectionToolbar } from "../../lib/pdfText";
-import type { ReaderBookmark } from "../../lib/readerSettings";
+import {
+  documentAutoTranslateSettingKey,
+  documentWordMeaningLookupSettingKey,
+  type ReaderBookmark,
+} from "../../lib/readerSettings";
 import type { OutlineAnchor, OutlineRow } from "../../lib/outlines";
 import type { PdfDocumentProxy } from "../../lib/pdfDocument";
 import type { PdfLinkPreviewTarget } from "../../lib/linkPreviews";
@@ -26,6 +30,7 @@ import type { UiStrings } from "../../lib/uiStrings";
 import type { ReaderMarkupTool } from "../../hooks/useReaderSelection";
 import { PdfPageView } from "./PdfPageView";
 import { TranslationSidecar } from "./TranslationSidecar";
+import { X } from "../icons";
 
 type RegionDrag = {
   page: number;
@@ -63,6 +68,7 @@ type ReaderWorkspaceProps = {
   pageMatches: number[];
   readerBookmarks: ReaderBookmark[];
   zoom: number;
+  onFitZoomChange: (zoom: number | null) => void;
   searchTerm: string;
   hoverSource: string | null;
   readerRef: RefObject<HTMLDivElement>;
@@ -96,6 +102,7 @@ type ReaderWorkspaceProps = {
   onGoToPage: (page: number) => void;
   onGoToOutlineRow: (row: OutlineRow) => void;
   onAddReaderBookmark: () => void;
+  onOpenSelectedSentenceActions: () => void;
   onGoToReaderBookmark: (bookmark: ReaderBookmark) => void;
   onDeleteReaderBookmark: (bookmarkId: string) => void;
   onSelectSentenceAndScroll: (id: string) => void;
@@ -115,6 +122,7 @@ type ReaderWorkspaceProps = {
   onOpenLinkPreview: (target: PdfLinkPreviewTarget) => void;
   onOpenWordMeaningPopup: (popup: WordPopup) => void;
   onFocusTranslationSentence: (id: string) => void;
+  onNewChat: () => Promise<void>;
   onQueueTask: (type: AiTaskType, payload: Record<string, unknown>) => void;
   onRunPendingBridgeWorkers: () => void;
   onPollBridge: () => void;
@@ -142,6 +150,32 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
   const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
   const estimatedPageWidth = Math.round(612 * props.zoom);
   const estimatedPageHeight = Math.round(792 * props.zoom);
+
+  useEffect(() => {
+    const stage = props.readerRef.current;
+    const pdf = props.pdfDocument;
+    if (!stage || !pdf || !props.activeDocument) {
+      props.onFitZoomChange(null);
+      return;
+    }
+    let cancelled = false;
+    let observer: ResizeObserver | null = null;
+    void pdf.getPage(Math.min(props.pageCursor, pdf.numPages)).then((page) => {
+      if (cancelled) return;
+      const pageWidth = page.getViewport({ scale: 1 }).width;
+      const measure = () => {
+        const next = Math.max(0.2, Math.floor(((stage.clientWidth - 96) / pageWidth) * 100) / 100);
+        props.onFitZoomChange(Number.isFinite(next) ? next : null);
+      };
+      observer = new ResizeObserver(measure);
+      observer.observe(stage);
+      measure();
+    }).catch(() => { if (!cancelled) props.onFitZoomChange(null); });
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+    };
+  }, [props.activeDocument?.id, props.pdfDocument, props.pageCursor, props.readerRef, props.onFitZoomChange, props.rightPanelOpen]);
 
   function nearbyPages(page: number) {
     const pages: number[] = [];
@@ -209,30 +243,43 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
 
   function toggleAutoTranslate() {
     const next = autoTranslate ? "false" : "true";
+    const documentKey = props.activeDocument ? documentAutoTranslateSettingKey(props.activeDocument.id) : null;
     props.onPatchState((draft) => {
       draft.settings.autoTranslate = next;
+      if (documentKey) draft.settings[documentKey] = next;
     });
-    void setSetting("autoTranslate", next);
+    void setSettings(documentKey ? [["autoTranslate", next], [documentKey, next]] : [["autoTranslate", next]]);
   }
 
   function toggleWordMeaningLookup() {
     const next = wordMeaningLookupEnabled(props.state.settings) ? "false" : "true";
+    const documentKey = props.activeDocument ? documentWordMeaningLookupSettingKey(props.activeDocument.id) : null;
     props.onPatchState((draft) => {
       draft.settings[wordMeaningLookupEnabledSettingKey] = next;
+      if (documentKey) draft.settings[documentKey] = next;
     });
     if (next === "false") {
       props.onToggleWordPopupClosed();
     }
-    void setSetting(wordMeaningLookupEnabledSettingKey, next);
+    void setSettings(documentKey
+      ? [[wordMeaningLookupEnabledSettingKey, next], [documentKey, next]]
+      : [[wordMeaningLookupEnabledSettingKey, next]]);
   }
 
   function handleWordSelect(popup: WordPopup) {
-    if (props.translationPanelOpen) {
-      props.onToggleWordPopupClosed();
-      if (popup.sourceSentenceId) {
-        props.onFocusTranslationSentence(popup.sourceSentenceId);
+    const sentenceId = popup.sourceSentenceId;
+    if (props.translationPanelOpen && sentenceId) {
+      const page = props.activePages.find((item) => item.pageNumber === popup.page);
+      const translationUnits = popup.page === props.pageCursor
+        ? props.currentTranslationUnits
+        : translationUnitsForPage(page, props.activeAiResults, props.translationLanguageName);
+      if (translationUnits.some(
+        (unit) => (unit.id === sentenceId || unit.sourceIds?.includes(sentenceId)) && unit.translation.trim(),
+      )) {
+        props.onToggleWordPopupClosed();
+        props.onFocusTranslationSentence(sentenceId);
+        return;
       }
-      return;
     }
     props.onOpenWordMeaningPopup(popup);
   }
@@ -307,7 +354,9 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
             wordListCount={props.activeDocumentWordList.length}
             missingWordCount={props.missingWordCount}
             readerBookmarkCount={props.readerBookmarks.length}
+            hasSentenceActions={Boolean(props.selectedSentenceId)}
             onAddReaderBookmark={props.onAddReaderBookmark}
+            onOpenSentenceActions={props.onOpenSelectedSentenceActions}
             onSelectHighlightColor={(color) =>
               props.setMarkupTool((current) =>
                 current.kind === "highlight" && current.color === color ? { kind: "none" } : { kind: "highlight", color },
@@ -392,19 +441,30 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
               const progress = Math.max(0, Math.min(1, bookmark.scrollRatio));
               const title = `${props.ui.goToReaderBookmark} - ${props.ui.page} ${bookmark.page}, ${Math.round(bookmark.zoom * 100)}%`;
               return (
-                <button
+                <div
                   key={bookmark.id}
-                  type="button"
-                  className="reader-bookmark-dot"
+                  className="reader-bookmark-item"
                   style={{ top: `${Math.round(progress * 1000) / 10}%` } as CSSProperties}
-                  title={`${title}. ${props.ui.deleteReaderBookmarkHint}`}
-                  aria-label={title}
-                  onClick={() => props.onGoToReaderBookmark(bookmark)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    props.onDeleteReaderBookmark(bookmark.id);
-                  }}
-                />
+                >
+                  <button
+                    type="button"
+                    className="reader-bookmark-delete"
+                    title={props.ui.delete}
+                    aria-label={`${props.ui.delete} · ${title}`}
+                    onClick={() => props.onDeleteReaderBookmark(bookmark.id)}
+                  ><X size={12} /></button>
+                  <button
+                    type="button"
+                    className="reader-bookmark-dot"
+                    title={title}
+                    aria-label={title}
+                    onClick={() => props.onGoToReaderBookmark(bookmark)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      props.onDeleteReaderBookmark(bookmark.id);
+                    }}
+                  />
+                </div>
               );
             })}
           </div>
@@ -423,7 +483,8 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
           settings={props.state.settings}
           outlineRows={props.activeOutlineRows}
           searchMatches={props.pageMatches}
-          onQueueTask={props.onQueueTask}
+          onNewChat={props.onNewChat}
+            onQueueTask={props.onQueueTask}
           onRunBridge={props.onRunPendingBridgeWorkers}
           onPollBridge={props.onPollBridge}
           onStartRegionExplain={() => {

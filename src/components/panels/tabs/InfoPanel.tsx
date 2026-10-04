@@ -3,6 +3,7 @@ import { OutlineTitleText } from "../../FormattedAiText";
 import { folderDisplayName, folderTreeRows } from "../../../lib/libraryTree";
 import type { OutlineRow } from "../../../lib/outlines";
 import { useUiStrings } from "../../../lib/uiStrings";
+import { isTauriRuntime } from "../../../lib/tauri";
 import type { DocumentRecord, FolderRecord } from "../../../types";
 
 export function InfoPanel(props: {
@@ -41,7 +42,7 @@ export function InfoPanel(props: {
       </label>
       <label className="field">
         <span>{ui.folder}</span>
-        <select value={props.document.folderId ?? "root"} onChange={(event) => props.onMoveFolder(event.target.value)}>
+        <select title={props.document.sourcePath || undefined} disabled={isTauriRuntime()} value={props.document.folderId ?? "root"} onChange={(event) => props.onMoveFolder(event.target.value)}>
           {folderOptions.map((folder) => (
             <option key={folder.id} value={folder.id}>
               {folder.label}

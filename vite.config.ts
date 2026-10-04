@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   build: {
+    target: "safari16.4",
     rollupOptions: {
       output: {
         manualChunks(id) {

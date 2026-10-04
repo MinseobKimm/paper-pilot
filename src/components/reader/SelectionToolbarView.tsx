@@ -14,8 +14,10 @@ type SelectionToolbarViewProps = {
 
 export function SelectionToolbarView(props: SelectionToolbarViewProps) {
   const ui = useUiStrings();
+  const left = Math.max(12, Math.min(props.toolbar.x, window.innerWidth - 252));
+  const top = Math.max(72, Math.min(props.toolbar.y, window.innerHeight - 290));
   return (
-    <div className="selection-toolbar" style={{ left: props.toolbar.x, top: props.toolbar.y }}>
+    <div className="selection-toolbar" style={{ left, top }}>
       <button className="selection-row" onClick={props.onExplain}>
         <Maximize2 size={15} />
         <span>{ui.explain}</span>

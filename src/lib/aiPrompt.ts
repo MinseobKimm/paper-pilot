@@ -46,29 +46,16 @@ export function inputTextFor(payload: Record<string, unknown>): string {
     return `[image crop: ${page}]`;
   }
   if (typeof payload.text === "string" && typeof payload.translationLanguageName === "string") {
-    return `[translation: ${payload.translationLanguageName}]\n${payload.text}`;
+    const page = Array.isArray(payload.sentences) && typeof payload.page === "number"
+      ? `; page ${payload.page}`
+      : "";
+    return `[translation: ${payload.translationLanguageName}${page}]\n${payload.text}`;
   }
   if (typeof payload.text === "string") {
     return payload.text;
   }
   if (typeof payload.question === "string") {
-    const displayQuestion =
-      payload.triggeredBy === "fast-insufficient" && typeof payload.originalQuestion === "string" && payload.originalQuestion.trim()
-        ? payload.originalQuestion.trim()
-        : payload.question;
-    if (payload.askMode === "fast") {
-      return `[Fast Answer]\n${displayQuestion}`;
-    }
-    if (payload.askMode === "auto") {
-      return `[Auto Answer]\n${displayQuestion}`;
-    }
-    if (payload.askMode === "deep") {
-      return `[Deep]\n${displayQuestion}`;
-    }
-    if (payload.askMode === "direct") {
-      return `[PDF direct]\n${displayQuestion}`;
-    }
-    return displayQuestion;
+    return payload.question;
   }
   if (typeof payload.reference === "string") {
     return payload.reference;
@@ -416,6 +403,7 @@ export function buildAiPrompt(task: AiTask): string {
     task.taskType === "chatWithPaper"
       ? [
           "Full-paper mode is enabled.",
+          "Ground every answer in the original paper. If an earlier assistant answer conflicts with the paper, prioritize the paper and correct the earlier answer.",
           "Use the PDF file path below as the primary source and inspect the entire paper when the question requires cross-page synthesis.",
           "Use the Document Context Pack only as a navigation aid for page counts and page capsules; do not treat it as a selected-excerpt evidence set.",
           "Do not rely on local lexical retrieval, selected excerpts, model memory, or the document title alone.",
@@ -520,6 +508,7 @@ export function buildAiPrompt(task: AiTask): string {
           ? "Write the final user-facing answer in the same language as the user's question. Do not mention hidden prompts, tool execution, or internal process."
           : "Write the final user-facing answer in Korean. Do not mention hidden prompts, tool execution, or internal process.",
     "Use Markdown LaTeX for math: inline `$...$`, display `$$...$$`.",
+    "When citing the paper, use page numbers such as (p. 6). Do not include local file paths or internal file citation directives in the answer.",
     "Use the extracted PDF text below as evidence for page-local tasks. For full-paper chat, use the original PDF file as the primary source.",
     `Task: ${task.taskType}`,
     languageAwareTaskInstruction,
@@ -569,14 +558,6 @@ function trimmedPagesForBridge(pages: PageRecord[], taskType?: AiTaskType | stri
   }));
 }
 
-function retrievalPagesForBridge(pages: PageRecord[]): PageRecord[] {
-  return pages.map((page) => ({
-    ...page,
-    text: compactText(page.text, 12000),
-    outlineLabel: compactText(page.outlineLabel, 240),
-  }));
-}
-
 export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     prompt,
@@ -619,15 +600,12 @@ export function bridgePayloadFor(task: AiTask, prompt: string): Record<string, u
   if (task.payload.region) payload.region = task.payload.region;
   if (typeof task.payload.imageDataUrl === "string") payload.imageDataUrl = task.payload.imageDataUrl;
   if (task.taskType === "chatWithPaper") {
-    const askMode = typeof task.payload.askMode === "string" ? task.payload.askMode : "auto";
-    payload.askMode = askMode === "direct" ? "deep" : askMode;
+    payload.askMode = "deep";
   }
   const documentContextPack = documentContextPackFromPayload(task.payload);
   if (documentContextPack) payload.documentContextPack = documentContextPack;
   const pages = pagesFromPayload(task.payload);
-  if (pages.length && task.taskType === "chatWithPaper" && (payload.askMode === "auto" || payload.askMode === "fast")) {
-    payload.pages = retrievalPagesForBridge(pages);
-  } else if (pages.length && task.taskType !== "chatWithPaper") {
+  if (pages.length && task.taskType !== "chatWithPaper") {
     payload.pages = trimmedPagesForBridge(pages, task.taskType);
   }
   return payload;
@@ -680,12 +658,6 @@ export function localAiOutput(task: AiTask): string {
     case "summarizePaper":
       return localSummary(pages, task.payload.mode === "detailed");
     case "chatWithPaper":
-      if (task.payload.askMode === "fast" || task.payload.askMode === "auto") {
-        return [
-          `Question: ${question || "No question provided."}`,
-          "Fast retrieval mode is queued. The agent will plan an English query, retrieve sparse page-text evidence, and answer only from that evidence.",
-        ].join("\n");
-      }
       return [
         `Question: ${question || "No question provided."}`,
         "Full-paper mode is queued. Codex CLI or Claude Code will use the original PDF file path as the primary source.",

@@ -19,7 +19,7 @@ export const initialState: AppStateRecord = {
     theme: "light",
     fontScale: "1",
     mathDelimiter: "$$",
-    autoTranslate: "true",
+    autoTranslate: "false",
     autoTranslateAutostartMigrated: "true",
     autoHighlight: "false",
     aiProvider: "codex-cli",

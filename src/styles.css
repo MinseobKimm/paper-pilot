@@ -702,6 +702,7 @@ button {
 }
 
 .library-file-row {
+  position: relative;
   display: grid;
   grid-template-columns: 26px 24px minmax(180px, 1fr) minmax(96px, auto) 72px 54px auto;
   gap: 10px;
@@ -773,6 +774,54 @@ button {
 .library-file-actions .icon-button {
   width: 32px;
   height: 32px;
+}
+
+.library-file-menu {
+  position: relative;
+}
+
+.library-file-menu > summary {
+  display: grid;
+  place-items: center;
+  list-style: none;
+  cursor: pointer;
+}
+
+.library-file-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.library-file-menu-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 120;
+  display: grid;
+  min-width: 150px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.library-file-menu-popover button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.library-file-menu-popover button:hover {
+  background: var(--surface-strong);
+}
+
+.library-file-menu-popover button.danger {
+  color: #b84d4d;
 }
 
 .explorer-empty {
@@ -2800,22 +2849,15 @@ select:disabled {
   font-weight: 800;
 }
 
-.translation-sentence p {
+.translation-content {
   grid-column: 2;
+  min-width: 0;
   margin: 0;
   font-size: 17px;
   line-height: 1.76;
   word-break: keep-all;
   overflow-wrap: anywhere;
   text-wrap: pretty;
-}
-
-.translation-line {
-  display: block;
-}
-
-.translation-line + .translation-line {
-  margin-top: 6px;
 }
 
 .translation-sentence .math-inline {
@@ -3135,34 +3177,6 @@ select:disabled {
   border-radius: 18px;
   background: #f5f6f9;
   overflow: hidden;
-}
-
-.ask-mode-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  margin: 8px 10px 0;
-  padding: 3px;
-  border: 1px solid #d8e0dc;
-  border-radius: 12px;
-  background: #eef3f0;
-}
-
-.ask-mode-tabs button {
-  height: 28px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: #53615c;
-  font-size: 12px;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.ask-mode-tabs button.active {
-  background: #ffffff;
-  color: #1f2d29;
-  box-shadow: 0 1px 3px rgba(22, 35, 30, 0.12);
 }
 
 .assistant-composer textarea {
@@ -3796,7 +3810,7 @@ select:disabled {
     grid-template-columns: minmax(300px, 1fr);
   }
 
-  .translation-sentence p {
+  .translation-content {
     font-size: 16px;
   }
 
@@ -3997,10 +4011,20 @@ select:disabled {
   pointer-events: none;
 }
 
-.reader-bookmark-dot {
+.reader-bookmark-item {
   position: absolute;
   right: 2px;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  width: 48px;
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.reader-bookmark-dot {
+  flex: none;
   width: 11px;
   height: 11px;
   padding: 0;
@@ -4010,8 +4034,28 @@ select:disabled {
   box-shadow:
     0 0 0 1px rgba(142, 28, 21, 0.28),
     0 3px 8px rgba(142, 28, 21, 0.34);
+  cursor: pointer;
+}
+
+.reader-bookmark-delete {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: #b84d4d;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+}
+
+.reader-bookmark-item:hover .reader-bookmark-delete,
+.reader-bookmark-item:focus-within .reader-bookmark-delete {
+  opacity: 1;
   pointer-events: auto;
-  transform: translateY(-50%);
 }
 
 .reader-bookmark-dot:hover,
@@ -4227,9 +4271,27 @@ select:disabled {
   box-shadow: inset 3px 0 0 #d99b1d;
 }
 
-.translation-sentence p {
+.translation-content {
   font-size: 15px;
   line-height: 1.65;
+}
+
+.translation-content .math-block {
+  font-size: 0.9em;
+  scrollbar-width: thin;
+}
+
+.translation-content .math-block .katex-display,
+.translation-content .math-block .katex-display > .katex,
+.translation-content .math-block .katex-display > .katex > .katex-html {
+  width: max-content;
+  min-width: 100%;
+  text-align: left;
+}
+
+.translation-content .math-block .katex-display > .katex > .katex-html {
+  box-sizing: border-box;
+  padding-right: 2.5em;
 }
 
 .right-panel {
@@ -4323,7 +4385,7 @@ select:disabled {
     grid-template-columns: minmax(300px, 1fr);
   }
 
-  .translation-sentence p {
+  .translation-content {
     font-size: 14px;
   }
 }
@@ -4739,6 +4801,117 @@ select:disabled {
   background: rgba(14, 107, 98, 0.26);
 }
 
+/* Keep every reader pane in the grid so opening notes takes its own space. */
+.reader-grid {
+  width: 100%;
+  grid-template-columns:
+    minmax(140px, min(var(--outline-width, 220px), 19vw))
+    minmax(200px, min(var(--translation-width, 360px), 27vw))
+    minmax(0, 1fr)
+    minmax(220px, min(var(--right-panel-width, 340px), 34vw));
+}
+
+.reader-grid.panel-closed {
+  grid-template-columns:
+    minmax(140px, min(var(--outline-width, 220px), 19vw))
+    minmax(200px, min(var(--translation-width, 360px), 27vw))
+    minmax(0, 1fr);
+}
+
+.reader-grid.translation-closed {
+  grid-template-columns:
+    minmax(140px, min(var(--outline-width, 220px), 19vw))
+    minmax(0, 1fr)
+    minmax(220px, min(var(--right-panel-width, 340px), 34vw));
+}
+
+.reader-grid.panel-closed.translation-closed {
+  grid-template-columns: minmax(140px, min(var(--outline-width, 220px), 19vw)) minmax(0, 1fr);
+}
+
+.reader-grid.outline-closed {
+  grid-template-columns:
+    minmax(200px, min(var(--translation-width, 360px), 27vw))
+    minmax(0, 1fr)
+    minmax(220px, min(var(--right-panel-width, 340px), 34vw));
+}
+
+.reader-grid.outline-closed.panel-closed {
+  grid-template-columns: minmax(200px, min(var(--translation-width, 360px), 27vw)) minmax(0, 1fr);
+}
+
+.reader-grid.outline-closed.translation-closed {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, min(var(--right-panel-width, 340px), 34vw));
+}
+
+.reader-grid.outline-closed.panel-closed.translation-closed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.note-editor-toolbar,
+.note-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.note-indent-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.note-level-indicator {
+  margin-right: auto;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--teal) 10%, var(--paper));
+  color: var(--teal);
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.zoom-select.fit {
+  width: 132px;
+}
+
+.note-indent-actions button,
+.note-delete-button {
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.note-indent-actions button:hover,
+.note-delete-button:hover {
+  border-color: var(--teal);
+}
+
+.notes-panel textarea {
+  min-height: min(50vh, 520px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.note-editor-footer {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.note-delete-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: #a43b43;
+}
+
 .outline-entry > span {
   grid-template-columns: minmax(0, 1fr);
   gap: 2px;
@@ -4767,4 +4940,18 @@ select:disabled {
   margin: 10px 4px;
   font-size: 12px;
   line-height: 1.5;
+}
+.obsidian-settings { align-items: flex-start; }
+.obsidian-settings > div { width: 100%; }
+.obsidian-settings p { overflow-wrap: anywhere; margin: 8px 0; }
+.obsidian-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.obsidian-settings-actions label { display: inline-flex; align-items: center; gap: 5px; }
+.obsidian-settings .field { display: flex; flex-direction: column; gap: 5px; }
+.obsidian-settings .field input { width: 100%; }
+.note-obsidian-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.note-obsidian-status small { flex-basis: 100%; overflow-wrap: anywhere; }
+
+.composer-footer button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "./tauri";
 import type { CitationCardRecord, DocumentRecord } from "../types";
 
 const openAlexApi = "https://api.openalex.org";
@@ -178,18 +180,26 @@ export function normalizeExternalUrl(rawUrl: string): string | null {
   }
   try {
     const parsed = new URL(trimmed);
-    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? parsed.toString() : null;
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : null;
   } catch {
     return null;
   }
 }
 
-export function openExternalUrl(rawUrl: string): boolean {
+export async function openExternalUrl(rawUrl: string): Promise<boolean> {
   const url = normalizeExternalUrl(rawUrl);
   if (!url) {
     return false;
   }
-  window.open(url, "_blank", "noopener,noreferrer");
+  if (isTauriRuntime()) {
+    try {
+      await invoke("open_external_url", { url });
+    } catch {
+      return false;
+    }
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
   return true;
 }
 

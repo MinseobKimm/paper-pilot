@@ -58,7 +58,9 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 
 ![Paper Pilot library sidebar](docs/images/usage-library-sidebar.png)
 
-- Add PDF imports papers into the selected folder.
+- Add PDF links the original file in Finder. Paper Pilot reads that file directly and does not create a second PDF in its app data.
+- If the original moves or is deleted, opening its library entry asks you to locate the same PDF again. Keep your PDF folder backed up separately.
+- Obsidian sync can write your paper notes and metadata into one Markdown file per paper. Choose a local vault in Settings and enable automatic sync; it is off by default. Paper Pilot updates its marked section while preserving notes you add below it in Obsidian.
 - Create folders from the folder area, then select a folder to filter the library.
 - Search filters papers by title, authors, year, abstract, and folder context.
 - Open a paper from its card, bookmark important papers, and edit paper details from the library inspector.
@@ -92,19 +94,14 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 
 ## Ask AI Paper Q&A
 
-Paper Pilot offers three paper chat modes:
+Paper chat always gives the selected agent the original PDF path and a compact document context pack. The agent checks the paper directly and cites pages. Earlier assistant answers are corrected when they conflict with the original paper.
 
-| Mode | Best for | How it works |
-| --- | --- | --- |
-| `Auto` | Letting the selected agent choose the path | The agent rewrites the question in English and chooses Fast or Deep. |
-| `Fast` | Quick, text-grounded questions | Uses PaperQA2-powered evidence search over Reader-indexed page text, then answers from retrieved evidence with page citations. |
-| `Deep` | Equations, figures, tables, algorithms, layout-sensitive details, and complex cross-page reasoning | Gives the selected agent the original PDF path plus a compact document context pack for a full-paper pass. |
+Each paper keeps its own agent session, including across app restarts. **New chat** starts a fresh session without deleting previous messages. There is no automatic reset based on elapsed time or question count. Missing or invalid saved sessions are retried once as a new conversation. Sending another question or starting a new chat is disabled while the current paper answer is pending.
 
-Fast mode is powered by [PaperQA2](https://github.com/Future-House/paper-qa), installed through the Python package `paper-qa>=5` in `requirements.txt`. It keeps answers tied to the page text that Paper Pilot has already indexed. When Fast evidence is thin, the answer is marked as evidence-limited and the reader can continue with Deep for a more complete pass.
 
 ## Privacy Model
 
-Paper Pilot is built around local files and local state. AI providers receive only the context needed for the task you run, such as selected text, page excerpts, an image crop, or the original PDF path for Deep mode. For private or unpublished papers, choose the provider deliberately.
+Paper Pilot is built around local files and local state. AI providers receive only the context needed for the task you run, such as selected text, page excerpts, an image crop, or the original PDF path for paper chat. For private or unpublished papers, choose the provider deliberately.
 
 ## Language Support
 
@@ -122,6 +119,12 @@ Paper Pilot is built around local files and local state. AI providers receive on
 - Python 3.11+
 - Codex CLI or Claude Code CLI for full agent execution
 
+On macOS, Paper Pilot supports macOS 13.3 or newer. Homebrew users can install the build prerequisites with:
+
+```bash
+brew install node rust python@3.12
+```
+
 ### Clone
 
 ```bash
@@ -136,7 +139,7 @@ npm install
 npm run setup:python
 ```
 
-`npm run setup:python` runs `python -m pip install -r requirements.txt`. That installs PaperQA2 through `paper-qa>=5`, which Fast Q&A expects. On Windows, `py -3 -m pip install -r requirements.txt` is also fine when the Python launcher is configured for Python 3.11 or newer.
+`npm run setup:python` creates an isolated Python environment and installs PaperQA2 through `paper-qa>=5`. On macOS the environment is stored under `~/Library/Application Support/local.paper-pilot.reader/python`, so a Finder-launched app can find it without inheriting a terminal `PATH`. Run this command again after changing `requirements.txt`.
 
 ## Run
 
@@ -161,20 +164,39 @@ npm run build
 npm run tauri:build
 ```
 
+To build the macOS app and update the stable `release/Paper Pilot.app` used for PDF file associations:
+
+```bash
+npm run build:mac
+```
+
+Quit and reopen Paper Pilot after rebuilding. Run `npm run build:mac:dmg` separately if you need a DMG.
+
 The production executable is generated under:
 
 ```text
 src-tauri/target/release/
 ```
 
+macOS artifacts are written to:
+
+```text
+release/Paper Pilot.app
+src-tauri/target/release/bundle/macos/Paper Pilot.app
+src-tauri/target/release/bundle/dmg/Paper Pilot_<version>_<architecture>.dmg
+```
+
+Local builds use an ad-hoc signature. Distributing the app to other Macs without a Gatekeeper warning requires an Apple Developer signing identity and notarization credentials.
+
 ## Check
 
 ```bash
 npm test
-npm run desktop:check
+npm run desktop:test
+python3 -m unittest discover -s retrieval-adapter -p 'test_*.py'
 ```
 
-`npm test` runs the TypeScript and Vite build check. `npm run desktop:check` checks the Rust/Tauri backend.
+`npm test` runs the TypeScript and Vite build check. `npm run desktop:test` runs the Rust/Tauri backend tests. The Python command verifies page-grounded retrieval and its local fallback.
 
 ## Provider Setup
 
@@ -183,7 +205,7 @@ Open Settings in Paper Pilot and choose a provider.
 | Provider | Setup |
 | --- | --- |
 | Local draft | No external setup; useful for UI smoke checks. |
-| Codex CLI | Install Codex CLI and make sure `codex` is on `PATH`, or set `CODEX_BIN`. |
+| Codex CLI | Install Codex CLI and make sure `codex` is on `PATH`, or set `CODEX_BIN`. On macOS, Paper Pilot also detects the CLI bundled with Codex or ChatGPT. |
 | Claude Code | Install Claude Code and make sure `claude` is on `PATH`, or set `CLAUDE_CODE_BIN`. |
 
 ### Claude Code bridge
@@ -196,7 +218,7 @@ For privacy and safety, the Claude Code bridge runs with `--permission-mode dont
 
 Paper Pilot integrates third-party projects as dependencies and keeps their licenses separate from this repository's source license.
 
-- PaperQA2 / `paper-qa`: used by Fast Q&A for evidence retrieval. Source: [Future-House/paper-qa](https://github.com/Future-House/paper-qa). Package: [paper-qa on PyPI](https://pypi.org/project/paper-qa/). License: Apache License 2.0, copyright FutureHouse.
+- PaperQA2 / `paper-qa`: retained for the standalone legacy retrieval adapter. Source: [Future-House/paper-qa](https://github.com/Future-House/paper-qa). Package: [paper-qa on PyPI](https://pypi.org/project/paper-qa/). License: Apache License 2.0, copyright FutureHouse.
 - PaperQA2 research citation: Skarlinski et al., "Language agents achieve superhuman synthesis of scientific knowledge", arXiv:2409.13740. Use the upstream [CITATION.cff](https://github.com/Future-House/paper-qa/blob/main/CITATION.cff) when publishing work that relies on PaperQA2 results.
 
 Paper Pilot does not vendor PaperQA2 source code. It calls the installed Python package through the local retrieval adapter.

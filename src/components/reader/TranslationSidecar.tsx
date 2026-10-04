@@ -1,54 +1,11 @@
 import { useEffect, useRef, type PointerEvent } from "react";
 import { RefreshCw, Sparkles, X } from "../icons";
 import { InlineMathText } from "../FormattedAiText";
-import { smartSentenceParts, type TranslationUnit } from "../../lib/translations";
+import type { TranslationUnit } from "../../lib/translations";
 import type { UiStrings } from "../../lib/uiStrings";
-function readableTranslationLines(text: string) {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return [""];
-  }
-  const chunks = smartSentenceParts(normalized);
-  const lines: string[] = [];
-  let line = "";
-  const flush = () => {
-    if (line.trim()) {
-      lines.push(line.trim());
-      line = "";
-    }
-  };
-  for (const chunk of chunks.length ? chunks : [normalized]) {
-    const next = line ? `${line} ${chunk}` : chunk;
-    if (line && next.length > 82) {
-      flush();
-      line = chunk;
-    } else {
-      line = next;
-    }
-    if (/[.!?]$/.test(chunk) && line.length > 48) {
-      flush();
-    }
-  }
-  flush();
-  return lines.flatMap((item) => {
-    if (item.length <= 110) {
-      return [item];
-    }
-    return item.match(/.{1,100}(?:\s|$)/g)?.map((part) => part.trim()).filter(Boolean) ?? [item];
-  });
-}
-
 
 function ReadableTranslationText(props: { text: string }) {
-  return (
-    <>
-      {readableTranslationLines(props.text).map((line, index) => (
-        <span key={`${line}-${index}`} className="translation-line">
-          <InlineMathText text={line} inlineOnly />
-        </span>
-      ))}
-    </>
-  );
+  return <InlineMathText text={props.text.replace(/\s+/g, " ").trim()} />;
 }
 
 export function TranslationSidecar(props: {
@@ -107,7 +64,9 @@ export function TranslationSidecar(props: {
             unit.translation ||
             (unit.status === "pending"
               ? props.ui.translationPending
-              : props.ui.translationMissing);
+              : unit.status === "failed"
+                ? props.ui.translationFailed
+                : props.ui.translationMissing);
           return (
             <button
               key={unit.id}
@@ -118,9 +77,9 @@ export function TranslationSidecar(props: {
               onClick={() => props.onSelectSentence(sourceIds[0] ?? unit.id)}
             >
               <span>{unit.index + 1}</span>
-              <p>
+              <div className="translation-content">
                 <ReadableTranslationText text={text} />
-              </p>
+              </div>
             </button>
           );
         })}

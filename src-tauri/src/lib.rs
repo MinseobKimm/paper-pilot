@@ -13,14 +13,22 @@ use std::io::{Cursor, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Manager};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
+
+mod library_fs;
+mod obsidian;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 type AppResult<T> = Result<T, String>;
+
+#[derive(Default)]
+struct OpenedPdfPaths(Mutex<Vec<PathBuf>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +37,8 @@ pub struct FolderRecord {
     pub parent_id: Option<String>,
     pub name: String,
     pub created_at: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +48,8 @@ pub struct DocumentRecord {
     pub title: String,
     pub file_name: String,
     pub file_path: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
     pub hash: String,
     pub page_count: i64,
     pub authors: String,
@@ -399,6 +411,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
     );
     let _ = conn.execute("ALTER TABLE ai_results ADD COLUMN provider TEXT", []);
     let _ = conn.execute("ALTER TABLE ai_results ADD COLUMN model TEXT", []);
+    let _ = conn.execute("ALTER TABLE documents ADD COLUMN source_path TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE ai_results ADD COLUMN provider_session_id TEXT",
         [],
@@ -419,7 +432,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         ("theme", "light"),
         ("fontScale", "1"),
         ("mathDelimiter", "$$"),
-        ("autoTranslate", "true"),
+        ("autoTranslate", "false"),
         ("autoTranslateAutostartMigrated", "true"),
         ("autoHighlight", "false"),
         ("aiProvider", "codex-cli"),
@@ -438,6 +451,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         )
         .map_err(|error| error.to_string())?;
     }
+    obsidian::migrate(conn)?;
     conn.execute(
         "UPDATE settings SET value = 'codex-cli' WHERE key = 'aiProvider' AND value = 'chatgpt-web-bridge'",
         [],
@@ -482,22 +496,30 @@ fn row_folder(row: &Row<'_>) -> rusqlite::Result<FolderRecord> {
         parent_id: row.get(1)?,
         name: row.get(2)?,
         created_at: row.get(3)?,
+        source_path: None,
     })
 }
 
 fn row_document(row: &Row<'_>) -> rusqlite::Result<DocumentRecord> {
     let bookmarked: i64 = row.get(10)?;
+    let source_path: Option<String> = row.get(13)?;
+    let folder_id = source_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+        .map(library_fs::folder_id)
+        .or(row.get(9)?);
     Ok(DocumentRecord {
         id: row.get(0)?,
         title: row.get(1)?,
         file_name: row.get(2)?,
         file_path: row.get(3)?,
+        source_path,
         hash: row.get(4)?,
         page_count: row.get(5)?,
         authors: row.get(6)?,
         year: row.get(7)?,
         abstract_text: row.get(8)?,
-        folder_id: row.get(9)?,
+        folder_id,
         bookmarked: bookmarked != 0,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
@@ -607,17 +629,30 @@ where
     Ok(rows)
 }
 
-fn load_state_from_db(conn: &Connection) -> AppResult<AppStateRecord> {
-    let folders = collect_query(
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibrarySnapshot {
+    folders: Vec<FolderRecord>,
+    documents: Vec<DocumentRecord>,
+}
+
+fn load_library_from_db(conn: &Connection) -> AppResult<LibrarySnapshot> {
+    let mut folders = collect_query(
         conn,
         "SELECT id, parent_id, name, created_at FROM folders ORDER BY created_at ASC",
         row_folder,
     )?;
     let documents = collect_query(
         conn,
-        "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at FROM documents ORDER BY updated_at DESC",
+        "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at, source_path FROM documents ORDER BY updated_at DESC",
         row_document,
     )?;
+    library_fs::append_source_folders(&mut folders, &documents, &library_fs::home_dir());
+    Ok(LibrarySnapshot { folders, documents })
+}
+
+fn load_state_from_db(conn: &Connection) -> AppResult<AppStateRecord> {
+    let LibrarySnapshot { folders, documents } = load_library_from_db(conn)?;
     let pages = collect_query(
         conn,
         "SELECT document_id, page_number, text, outline_label FROM pages ORDER BY document_id, page_number",
@@ -682,7 +717,7 @@ fn load_state_from_db(conn: &Connection) -> AppResult<AppStateRecord> {
 fn export_bundle(conn: &Connection, document_id: &str) -> AppResult<ExportBundle> {
     let document = conn
         .query_row(
-            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at FROM documents WHERE id = ?1",
+            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at, source_path FROM documents WHERE id = ?1",
             params![&document_id],
             row_document,
         )
@@ -772,9 +807,23 @@ fn export_bundle(conn: &Connection, document_id: &str) -> AppResult<ExportBundle
 }
 
 #[tauri::command]
-fn load_app_state(app: AppHandle) -> AppResult<AppStateRecord> {
-    let conn = open_db(&app)?;
-    load_state_from_db(&conn)
+async fn load_app_state(app: AppHandle) -> AppResult<AppStateRecord> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app)?;
+        load_state_from_db(&conn)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn load_library(app: AppHandle) -> AppResult<LibrarySnapshot> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app)?;
+        load_library_from_db(&conn)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn path_within(path: &Path, root: &Path) -> bool {
@@ -819,6 +868,7 @@ fn reset_workspace_files(app: AppHandle, bridge_dir: String) -> AppResult<ResetW
             "citation_cards",
             "recommendation_runs",
             "documents",
+            "obsidian_links",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|error| error.to_string())?;
@@ -862,87 +912,157 @@ fn reset_workspace_files(app: AppHandle, bridge_dir: String) -> AppResult<ResetW
 }
 
 #[tauri::command]
-fn import_pdf(app: AppHandle, name: String, bytes: Vec<u8>) -> AppResult<DocumentRecord> {
-    let conn = open_db(&app)?;
-    let hash = sha256_hex(&bytes);
-    let existing = conn
-        .query_row(
-            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at FROM documents WHERE hash = ?1",
-            params![hash],
-            row_document,
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    if let Some(document) = existing {
-        return Ok(document);
-    }
-
-    let id = Uuid::new_v4().to_string();
-    let safe_name = sanitize_file_name(&name);
-    let docs_dir = app_dir(&app)?.join("documents");
-    fs::create_dir_all(&docs_dir).map_err(|error| error.to_string())?;
-    let file_path = docs_dir.join(format!("{id}-{safe_name}"));
-    fs::write(&file_path, bytes).map_err(|error| error.to_string())?;
-    let timestamp = now();
-    let title = safe_name.trim_end_matches(".pdf").replace('_', " ");
-
-    let document = DocumentRecord {
-        id,
-        title,
-        file_name: safe_name,
-        file_path: file_path.to_string_lossy().to_string(),
-        hash,
-        page_count: 0,
-        authors: String::new(),
-        year: String::new(),
-        abstract_text: String::new(),
-        folder_id: Some("root".to_string()),
-        bookmarked: false,
-        created_at: timestamp.clone(),
-        updated_at: timestamp,
+fn take_opened_pdfs(
+    app: AppHandle,
+    opened: State<OpenedPdfPaths>,
+) -> AppResult<Vec<DocumentRecord>> {
+    let paths = {
+        let mut pending = opened.0.lock().map_err(|error| error.to_string())?;
+        std::mem::take(&mut *pending)
     };
+    paths
+        .into_iter()
+        .map(|path| import_pdf_path(&app, &path))
+        .collect()
+}
 
-    conn.execute(
-        "INSERT INTO documents (id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
-            document.id,
-            document.title,
-            document.file_name,
-            document.file_path,
-            document.hash,
-            document.page_count,
-            document.authors,
-            document.year,
-            document.abstract_text,
-            document.folder_id,
-            if document.bookmarked { 1 } else { 0 },
-            document.created_at,
-            document.updated_at
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-
+fn import_pdf_path(app: &AppHandle, path: &Path) -> AppResult<DocumentRecord> {
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if !path.is_file()
+        || !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    {
+        return Err(format!("Not a PDF file: {}", path.display()));
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let conn = open_db(app)?;
+    let document = library_fs::register_linked_pdf(
+        &conn,
+        &path,
+        &sha256_hex(&bytes),
+        &app_dir(app)?.join("documents"),
+    )?;
+    obsidian::queue(app, &conn, &document.id);
     Ok(document)
+}
+
+#[tauri::command]
+async fn import_pdf_paths(app: AppHandle, paths: Vec<String>) -> AppResult<Vec<DocumentRecord>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| import_pdf_path(&app, Path::new(path)))
+            .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn pick_pdfs(app: AppHandle) -> AppResult<Vec<DocumentRecord>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .add_filter("PDF", &["pdf"])
+            .blocking_pick_files();
+        selected
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| {
+                let path = file.into_path().map_err(|error| error.to_string())?;
+                import_pdf_path(&app, &path)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 fn read_document_bytes(app: AppHandle, document_id: String) -> AppResult<Vec<u8>> {
     let conn = open_db(&app)?;
-    let path: String = conn
+    let (source, expected_hash): (Option<String>, String) = conn
         .query_row(
-            "SELECT file_path FROM documents WHERE id = ?1",
+            "SELECT source_path, hash FROM documents WHERE id = ?1",
             params![&document_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
-    fs::read(path).map_err(|error| error.to_string())
+    let path =
+        source.ok_or_else(|| "PDF_SOURCE_MISSING: 원본 PDF를 다시 지정해 주세요.".to_string())?;
+    let bytes = fs::read(&path).map_err(|_| format!("PDF_SOURCE_MISSING: {path}"))?;
+    if sha256_hex(&bytes) != expected_hash {
+        return Err(format!("PDF_SOURCE_CHANGED: {path}"));
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+async fn relink_pdf(app: AppHandle, document_id: String) -> AppResult<Option<DocumentRecord>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(selected) = app.dialog().file().add_filter("PDF", &["pdf"]).blocking_pick_file() else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|error| error.to_string())?
+            .canonicalize().map_err(|error| error.to_string())?;
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+            return Err("PDF 파일을 선택해 주세요.".into());
+        }
+        if path_within(&path, &app_dir(&app)?.join("documents")) {
+            return Err("앱 내부의 예전 사본 대신 원본 PDF를 선택해 주세요.".into());
+        }
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let conn = open_db(&app)?;
+        let mut document = conn.query_row(
+            "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at, source_path FROM documents WHERE id = ?1",
+            params![document_id], row_document,
+        ).map_err(|error| error.to_string())?;
+        if sha256_hex(&bytes) != document.hash {
+            return Err("선택한 PDF의 내용이 원래 논문과 다릅니다. 같은 PDF를 선택해 주세요.".into());
+        }
+        library_fs::remember_opened_source(&conn, &mut document, &path, &app_dir(&app)?.join("documents"))?;
+        obsidian::queue(&app, &conn, &document.id);
+        Ok(Some(document))
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 fn update_document(app: AppHandle, document: DocumentRecord) -> AppResult<DocumentRecord> {
     let conn = open_db(&app)?;
     let mut updated = document;
+    updated.source_path = conn
+        .query_row(
+            "SELECT source_path FROM documents WHERE id = ?1",
+            params![updated.id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    updated.file_path = conn
+        .query_row(
+            "SELECT file_path FROM documents WHERE id = ?1",
+            params![updated.id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(parent) = updated
+        .source_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+    {
+        updated.folder_id = Some(library_fs::folder_id(parent));
+    } else if updated
+        .folder_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("source-folder:"))
+    {
+        return Err(
+            "Choose a library folder for a document without an original file location".into(),
+        );
+    }
     updated.updated_at = now();
     conn.execute(
         "UPDATE documents SET title = ?2, file_name = ?3, file_path = ?4, hash = ?5, page_count = ?6, authors = ?7, year = ?8, abstract_text = ?9, folder_id = ?10, bookmarked = ?11, updated_at = ?13 WHERE id = ?1",
@@ -963,6 +1083,7 @@ fn update_document(app: AppHandle, document: DocumentRecord) -> AppResult<Docume
         ],
     )
     .map_err(|error| error.to_string())?;
+    obsidian::queue(&app, &conn, &updated.id);
     Ok(updated)
 }
 
@@ -1046,11 +1167,13 @@ fn delete_document_scoped_settings(
     prune_document_word_meanings(tx, document_id)?;
 
     for key in [
+        format!("paperChatExcludedResults:{document_id}"),
         format!("documentZoom:{document_id}"),
         format!("documentScrollLeft:{document_id}"),
         format!("readerBookmarks:{document_id}"),
         format!("readerLastViewport:{document_id}"),
         format!("pageTextLayoutAiVersion:{document_id}"),
+        format!("pdfTextExtractionVersion:{document_id}"),
         format!("documentOutlineVersion:{document_id}"),
         format!("readingStatus:{document_id}"),
         format!("documentWordList:{document_id}"),
@@ -1078,6 +1201,7 @@ fn delete_document_scoped_settings(
 #[tauri::command]
 fn delete_document(app: AppHandle, document_id: String) -> AppResult<()> {
     let mut conn = open_db(&app)?;
+    obsidian::unlink(&conn, &document_id);
     let file_path: Option<String> = conn
         .query_row(
             "SELECT file_path FROM documents WHERE id = ?1",
@@ -1154,6 +1278,14 @@ fn upsert_pages(app: AppHandle, document_id: String, pages: Vec<PageRecord>) -> 
 
 #[tauri::command]
 fn upsert_folder(app: AppHandle, folder: FolderRecord) -> AppResult<FolderRecord> {
+    if folder.id.starts_with("source-folder:")
+        || folder
+            .parent_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("source-folder:"))
+    {
+        return Err("Manage original file folders in Finder".into());
+    }
     let conn = open_db(&app)?;
     conn.execute(
         "INSERT INTO folders (id, parent_id, name, created_at) VALUES (?1, ?2, ?3, ?4)
@@ -1166,6 +1298,11 @@ fn upsert_folder(app: AppHandle, folder: FolderRecord) -> AppResult<FolderRecord
 
 #[tauri::command]
 fn delete_folders(app: AppHandle, ids: Vec<String>, reassign_folder_id: String) -> AppResult<()> {
+    if ids.iter().any(|id| id.starts_with("source-folder:"))
+        || reassign_folder_id.starts_with("source-folder:")
+    {
+        return Err("Manage original file folders in Finder".into());
+    }
     let mut conn = open_db(&app)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
     let timestamp = now();
@@ -1247,14 +1384,26 @@ fn upsert_note(app: AppHandle, note: NoteRecord) -> AppResult<NoteRecord> {
         params![note.id, note.document_id, note.markdown, note.updated_at],
     )
     .map_err(|error| error.to_string())?;
+    obsidian::queue(&app, &conn, &note.document_id);
     Ok(note)
 }
 
 #[tauri::command]
 fn delete_note(app: AppHandle, id: String) -> AppResult<()> {
     let conn = open_db(&app)?;
+    let document_id: Option<String> = conn
+        .query_row(
+            "SELECT document_id FROM notes WHERE id=?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     conn.execute("DELETE FROM notes WHERE id = ?1", params![id])
         .map_err(|error| error.to_string())?;
+    if let Some(document_id) = document_id {
+        obsidian::unlink(&conn, &document_id);
+    }
     Ok(())
 }
 
@@ -1320,44 +1469,63 @@ fn save_ai_result(app: AppHandle, result: AiResultRecord) -> AppResult<AiResultR
 }
 
 #[tauri::command]
-fn save_pdf_file(suggested_file_name: String, bytes: Vec<u8>) -> AppResult<Option<String>> {
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$dialog = New-Object System.Windows.Forms.SaveFileDialog
-$dialog.Title = 'Save translated PDF'
-$dialog.Filter = 'PDF files (*.pdf)|*.pdf|All files (*.*)|*.*'
-$dialog.DefaultExt = 'pdf'
-$dialog.AddExtension = $true
-$dialog.OverwritePrompt = $true
-$dialog.FileName = $env:PAPERDOCK_SAVE_NAME
-$owner = New-Object System.Windows.Forms.Form
-$owner.TopMost = $true
-if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  [Console]::Out.Write($dialog.FileName)
+async fn save_export_file(
+    app: AppHandle,
+    suggested_file_name: String,
+    bytes: Vec<u8>,
+) -> AppResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_file_name(&suggested_file_name)
+            .blocking_save_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|error| error.to_string())?;
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
-$owner.Dispose()
-"#;
-    let mut command = Command::new("powershell.exe");
-    command
-        .args(["-NoProfile", "-STA", "-Command", script])
-        .env("PAPERDOCK_SAVE_NAME", suggested_file_name)
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+
+#[tauri::command]
+fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let parsed = tauri::Url::parse(&url).map_err(|error| error.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only HTTP and HTTPS links can be opened".into());
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        return Ok(None);
-    }
-    fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    Ok(Some(path))
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_pdf_file(
+    app: AppHandle,
+    suggested_file_name: String,
+    bytes: Vec<u8>,
+) -> AppResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("Save translated PDF")
+            .set_file_name(&suggested_file_name)
+            .add_filter("PDF files", &["pdf"])
+            .blocking_save_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|error| error.to_string())?;
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1395,6 +1563,22 @@ fn set_setting(app: AppHandle, key: String, value: String) -> AppResult<()> {
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn set_settings(app: AppHandle, entries: Vec<(String, String)>) -> AppResult<()> {
+    let mut conn = open_db(&app)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    for (key, value) in entries {
+        transaction
+            .execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1503,6 +1687,13 @@ fn bridge_base(app: &AppHandle, bridge_dir: &str) -> AppResult<PathBuf> {
 }
 
 fn project_root(app: &AppHandle) -> PathBuf {
+    // A Finder-launched bundle must never write into / or its signed Resources.
+    if !cfg!(debug_assertions) {
+        return app
+            .path()
+            .app_data_dir()
+            .expect("Application data directory unavailable");
+    }
     let mut candidates = Vec::new();
 
     if let Ok(cwd) = env::current_dir() {
@@ -1523,8 +1714,8 @@ fn project_root(app: &AppHandle) -> PathBuf {
             path.join("package.json").exists() && path.join("src-tauri").join("Cargo.toml").exists()
         })
         .cloned()
-        .or_else(|| env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .or_else(|| app_dir(app).ok())
+        .unwrap_or_else(|| home_dir().join("Paper Pilot"))
 }
 
 #[derive(Debug, Clone)]
@@ -1550,9 +1741,30 @@ fn home_dir() -> PathBuf {
 }
 
 fn path_dirs() -> Vec<PathBuf> {
-    env::var_os("PATH")
+    let mut dirs: Vec<PathBuf> = env::var_os("PATH")
         .map(|value| env::split_paths(&value).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    {
+        let home = home_dir();
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+        for relative in [".local/bin", ".npm-global/bin", ".volta/bin", ".bun/bin"] {
+            dirs.push(home.join(relative));
+        }
+        if let Ok(entries) = fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut versions: Vec<_> = entries.flatten().map(|e| e.path().join("bin")).collect();
+            versions.sort();
+            versions.reverse();
+            dirs.extend(versions);
+        }
+    }
+    dirs
+}
+
+fn configure_child_path(command: &mut Command) {
+    if let Ok(path) = env::join_paths(path_dirs()) {
+        command.env("PATH", path);
+    }
 }
 
 fn expand_executable_candidate(path: PathBuf) -> Vec<PathBuf> {
@@ -1633,6 +1845,15 @@ fn command_candidates(provider: &str) -> Vec<PathBuf> {
         raw.push(PathBuf::from(
             "/Applications/Codex.app/Contents/Resources/codex",
         ));
+        raw.push(PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+        ));
+        raw.push(PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        ));
+        raw.push(PathBuf::from(
+            "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        ));
         raw.push(PathBuf::from("/opt/homebrew/bin/codex"));
         raw.push(PathBuf::from("/usr/local/bin/codex"));
     }
@@ -1652,7 +1873,7 @@ fn resolve_agent_command(provider: &str) -> AppResult<ResolvedAgentCommand> {
     let candidates = command_candidates(provider);
     let executable = candidates
         .iter()
-        .find(|path| path.exists())
+        .find(|path| path.is_file())
         .cloned()
         .ok_or_else(|| {
             let searched = candidates
@@ -1751,22 +1972,6 @@ fn task_document_file_path(task: &BridgeTask) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn task_ask_mode(task: &BridgeTask) -> String {
-    task.payload
-        .get("askMode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            if value.eq_ignore_ascii_case("direct") {
-                "deep".to_string()
-            } else {
-                value.to_ascii_lowercase()
-            }
-        })
-        .unwrap_or_else(|| "auto".to_string())
-}
-
 fn task_payload_string(task: &BridgeTask, key: &str) -> String {
     task.payload
         .get(key)
@@ -1774,24 +1979,6 @@ fn task_payload_string(task: &BridgeTask, key: &str) -> String {
         .map(str::trim)
         .unwrap_or("")
         .to_string()
-}
-
-fn json_string(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("")
-        .to_string()
-}
-
-fn compact_for_prompt(value: &str, limit: usize) -> String {
-    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if clean.chars().count() > limit {
-        format!("{}...", clean.chars().take(limit).collect::<String>())
-    } else {
-        clean
-    }
 }
 
 fn push_add_dir_arg(args: &mut Vec<String>, dir: &Path) {
@@ -2005,278 +2192,6 @@ fn agent_stdin_prompt(task: &BridgeTask, image_path: Option<&Path>) -> String {
         }
     }
     prompt
-}
-
-fn extract_json_object(text: &str) -> AppResult<Value> {
-    let trimmed = text.trim();
-    let fenced = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .map(|value| value.trim())
-        .and_then(|value| value.strip_suffix("```").map(str::trim))
-        .unwrap_or(trimmed);
-    if let Ok(value) = serde_json::from_str::<Value>(fenced) {
-        return Ok(value);
-    }
-    let start = fenced
-        .find('{')
-        .ok_or_else(|| "No JSON object found in agent output.".to_string())?;
-    let end = fenced
-        .rfind('}')
-        .ok_or_else(|| "No complete JSON object found in agent output.".to_string())?;
-    serde_json::from_str::<Value>(&fenced[start..=end]).map_err(|error| error.to_string())
-}
-
-fn planner_prompt(task: &BridgeTask, forced_mode: Option<&str>) -> String {
-    let question = task_payload_string(task, "question");
-    let document_title = task
-        .payload
-        .get("document")
-        .and_then(|document| document.get("title"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let mode_instruction = if forced_mode == Some("fast") {
-        "The mode is forced to fast. Return fast and include retrievalQueries."
-    } else {
-        "Choose deep if answering requires directly inspecting equations, figures, tables, algorithms, visual layout, or complex cross-page reasoning in the original PDF. Choose fast if text retrieval evidence should be enough."
-    };
-    format!(
-        "Convert the user's paper question into English and choose the answer mode.\n\n{mode_instruction}\n\nReturn only JSON. Do not include a reason.\nFor fast: {{\"englishQuestion\": string, \"mode\": \"fast\", \"retrievalQueries\": string[]}}\nFor deep: {{\"englishQuestion\": string, \"mode\": \"deep\"}}\n\nDocument title: {}\nUser question:\n{}",
-        compact_for_prompt(document_title, 500),
-        compact_for_prompt(&question, 3000)
-    )
-}
-
-fn normalize_planner_result(
-    value: Value,
-    forced_mode: Option<&str>,
-    fallback_question: &str,
-) -> Value {
-    let mut english_question = json_string(&value, "englishQuestion");
-    if english_question.is_empty() {
-        english_question = fallback_question.to_string();
-    }
-    let mut mode = json_string(&value, "mode").to_ascii_lowercase();
-    if let Some(forced) = forced_mode {
-        mode = forced.to_string();
-    }
-    if mode != "deep" {
-        mode = "fast".to_string();
-    }
-    let mut output = json!({
-        "englishQuestion": english_question,
-        "mode": mode,
-    });
-    if output.get("mode").and_then(Value::as_str) == Some("fast") {
-        let queries = value
-            .get("retrievalQueries")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .take(6)
-                    .map(|item| Value::String(item.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|items| !items.is_empty())
-            .unwrap_or_else(|| vec![Value::String(fallback_question.to_string())]);
-        output["retrievalQueries"] = Value::Array(queries);
-    }
-    output
-}
-
-fn direct_deep_prompt(
-    task: &BridgeTask,
-    english_question: &str,
-    original_question: &str,
-) -> String {
-    let pdf_path = task_document_file_path(task)
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let context = task
-        .payload
-        .get("documentContextPack")
-        .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
-        .unwrap_or_default();
-    format!(
-        "You are Paper Pilot, a private academic PDF research assistant.\n\nWrite the final answer in the same language as the original user question. Use Markdown LaTeX for math: inline `$...$`, display `$$...$$`.\n\nUse the original PDF file as the primary source. Inspect the entire paper when the question requires cross-page synthesis. Cite factual claims with page markers like (p. 12). If a page number cannot be verified, do not invent it.\n\nFull PDF file path:\n{}\n\nOriginal user question:\n{}\n\nEnglish inspection question:\n{}\n\nDocument Context Pack (navigation aid only):\n{}",
-        pdf_path,
-        compact_for_prompt(original_question, 3000),
-        compact_for_prompt(english_question, 3000),
-        compact_for_prompt(&context, 12000)
-    )
-}
-
-fn evidence_text_for_prompt(evidence: &[Value]) -> String {
-    evidence
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let page = item
-                .get("pageNumber")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            let score = item
-                .get("score")
-                .and_then(Value::as_f64)
-                .unwrap_or_default();
-            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-            format!(
-                "[{}] p.{} score={:.3}\n{}",
-                index + 1,
-                page,
-                score,
-                compact_for_prompt(text, 1400)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn fast_answer_prompt(planner: &Value, retrieval: &Value, original_question: &str) -> String {
-    let english_question = json_string(planner, "englishQuestion");
-    let evidence = retrieval
-        .get("evidence")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    format!(
-        "Answer the paper question using only the retrieved evidence below.\n\nReturn only JSON with this exact shape: {{\"answerMarkdown\": string, \"evidenceSufficient\": boolean}}\n\nRules:\n- Do not use model memory or the PDF path.\n- Cite every factual claim with page markers like (p. 12), using only page numbers shown in the evidence.\n- If the evidence only partially answers the question, still write the best evidence-based answer and set evidenceSufficient to false.\n- If evidence is empty or unrelated, answer briefly from the lack of evidence and set evidenceSufficient to false.\n- Write answerMarkdown in the same language as the original user question.\n\nOriginal user question:\n{}\n\nEnglish question:\n{}\n\nRetrieved evidence:\n{}",
-        compact_for_prompt(original_question, 3000),
-        compact_for_prompt(&english_question, 3000),
-        evidence_text_for_prompt(&evidence)
-    )
-}
-
-fn run_agent_stage(
-    task: &BridgeTask,
-    resolved: &ResolvedAgentCommand,
-    root: &Path,
-    prompt: &str,
-    response_file: &Path,
-    log_path: &Path,
-    error_log_path: &Path,
-    allow_resume: bool,
-    allow_pdf_access: bool,
-) -> AppResult<(i32, String, String, Option<String>, String)> {
-    let args = if task.provider == "claude-code" {
-        claude_args(task, root, allow_resume, allow_pdf_access)
-    } else {
-        codex_args(
-            task,
-            root,
-            response_file,
-            None,
-            allow_resume,
-            allow_pdf_access,
-        )
-    };
-    let (exit_code, stdout, stderr) = run_agent_command(
-        resolved,
-        &args,
-        Some(prompt),
-        root,
-        log_path,
-        error_log_path,
-    )?;
-    let (session_id, content) = if task.provider == "claude-code" {
-        parse_claude_output(&stdout)
-    } else {
-        parse_codex_output(&stdout, response_file)
-    };
-    if task.provider == "claude-code" {
-        write_agent_response_file(response_file, &content)?;
-    }
-    Ok((exit_code, stdout, stderr, session_id, content))
-}
-
-fn python_command_candidates() -> Vec<ResolvedAgentCommand> {
-    let mut candidates = Vec::new();
-    candidates.push(ResolvedAgentCommand {
-        command: PathBuf::from("python"),
-        args_prefix: Vec::new(),
-        source: PathBuf::from("python"),
-    });
-    candidates.push(ResolvedAgentCommand {
-        command: PathBuf::from("py"),
-        args_prefix: vec!["-3".to_string()],
-        source: PathBuf::from("py -3"),
-    });
-    candidates
-}
-
-fn run_sparse_retrieval(
-    root: &Path,
-    base: &Path,
-    task: &BridgeTask,
-    planner: &Value,
-) -> AppResult<Value> {
-    let script = root
-        .join("retrieval-adapter")
-        .join("paperqa_sparse_retrieve.py");
-    if !script.exists() {
-        return Err(format!(
-            "Sparse retrieval adapter not found: {}",
-            script.to_string_lossy()
-        ));
-    }
-    let queries = planner
-        .get("retrievalQueries")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let input = json!({
-        "documentId": &task.document_id,
-        "englishQuestion": json_string(planner, "englishQuestion"),
-        "queries": queries,
-        "pages": task.payload.get("pages").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
-        "cacheDir": base.join("retrieval-cache").to_string_lossy().to_string(),
-        "chunkSize": 1100,
-        "overlap": 220,
-        "maxChunks": 6,
-    });
-    let work_dir = base.join("retrieval");
-    fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
-    let input_path = work_dir.join(format!("{}.retrieval.input.json", task.id));
-    let output_path = work_dir.join(format!("{}.retrieval.output.json", task.id));
-    write_json_file(&input_path, &input)?;
-
-    let mut last_error = String::new();
-    for resolved in python_command_candidates() {
-        let mut command = Command::new(&resolved.command);
-        command
-            .args(&resolved.args_prefix)
-            .arg(&script)
-            .arg("--input")
-            .arg(&input_path)
-            .arg("--output")
-            .arg(&output_path)
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                let raw = fs::read_to_string(&output_path).map_err(|error| error.to_string())?;
-                return serde_json::from_str::<Value>(&raw).map_err(|error| error.to_string());
-            }
-            Ok(output) => {
-                last_error = decode_process_bytes(&output.stderr);
-                if last_error.trim().is_empty() {
-                    last_error = decode_process_bytes(&output.stdout);
-                }
-            }
-            Err(error) => {
-                last_error = error.to_string();
-            }
-        }
-    }
-    Err(format!("Sparse retrieval failed: {last_error}"))
 }
 
 fn collect_text_parts(value: &Value) -> Vec<String> {
@@ -2510,6 +2425,7 @@ fn run_agent_command(
     error_log_path: &Path,
 ) -> AppResult<(i32, String, String)> {
     let mut command = Command::new(&resolved.command);
+    configure_child_path(&mut command);
     command
         .args(&resolved.args_prefix)
         .args(args)
@@ -2575,279 +2491,50 @@ fn finish_agent_task(
     Ok(())
 }
 
-fn write_agent_progress(base: &Path, task: &BridgeTask, metadata: Value) -> AppResult<()> {
-    let inbox_file = base.join("inbox").join(format!("{}.json", task.id));
-    write_json_file(&inbox_file, &metadata)
+fn is_unavailable_session_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    // Only retry missing or invalid session errors, never auth/rate-limit/network failures.
+    ["session", "thread", "conversation", "rollout"]
+        .iter()
+        .any(|word| text.contains(word))
+        && [
+            "not found",
+            "no saved",
+            "does not exist",
+            "cannot find",
+            "could not find",
+            "unable to find",
+            "failed to load",
+            "failed to resume",
+            "invalid session",
+            "invalid thread",
+            "has expired",
+        ]
+        .iter()
+        .any(|word| text.contains(word))
 }
 
-fn run_planned_chat_task(
-    root: &Path,
-    base: &Path,
-    task_file: &Path,
+fn run_with_session_recovery(
     task: &BridgeTask,
-    resolved: &ResolvedAgentCommand,
-    final_log_path: &Path,
-) -> AppResult<Value> {
-    let requested_mode = task_ask_mode(task);
-    let forced_mode = if requested_mode == "fast" {
-        Some("fast")
-    } else {
-        None
-    };
-    let original_question = task_payload_string(task, "question");
-    let plan_response_file = base
-        .join("logs")
-        .join(format!("{}.planner.response.md", task.id));
-    let plan_log_path = base
-        .join("logs")
-        .join(format!("{}.planner.out.log", task.id));
-    let plan_error_log_path = base
-        .join("logs")
-        .join(format!("{}.planner.err.log", task.id));
-    let plan_prompt = planner_prompt(task, forced_mode);
-    let (plan_exit_code, _plan_stdout, plan_stderr, _plan_session_id, plan_content) =
-        run_agent_stage(
-            task,
-            resolved,
-            root,
-            &plan_prompt,
-            &plan_response_file,
-            &plan_log_path,
-            &plan_error_log_path,
-            false,
-            false,
-        )?;
-    if plan_content.trim().is_empty() {
-        let message = if plan_stderr.trim().is_empty() {
-            format!("Planner exited with code {plan_exit_code} and returned no JSON.")
-        } else {
-            plan_stderr
-        };
-        let metadata = json!({
-            "id": &task.id,
-            "taskType": &task.task_type,
-            "documentId": &task.document_id,
-            "provider": &task.provider,
-            "model": &task.model,
-            "providerSessionId": &task.provider_session_id,
-            "status": "failed",
-            "output": message,
-            "payload": {
-                "askMode": requested_mode,
-                "provider": &task.provider,
-                "model": &task.model,
-                "plannerExitCode": plan_exit_code,
-                "plannerLogPath": plan_log_path,
-                "plannerErrorLogPath": plan_error_log_path,
-                "finalLogPath": final_log_path,
-            },
-            "savedAt": now(),
-        });
-        finish_agent_task(base, task_file, task, metadata.clone())?;
-        return Ok(metadata);
-    }
-    let planner = normalize_planner_result(
-        extract_json_object(&plan_content)?,
-        forced_mode,
-        &original_question,
-    );
-    let english_question = json_string(&planner, "englishQuestion");
-    let planned_mode = json_string(&planner, "mode");
-    let progress_output = if planned_mode == "deep" {
-        "Deep is checking the original PDF."
-    } else {
-        "Fast Answer is retrieving page evidence."
-    };
-    write_agent_progress(
-        base,
-        task,
-        json!({
-            "id": &task.id,
-            "taskType": &task.task_type,
-            "documentId": &task.document_id,
-            "provider": &task.provider,
-            "model": &task.model,
-            "providerSessionId": &task.provider_session_id,
-            "status": "pending",
-            "output": progress_output,
-            "payload": {
-                "askMode": &planned_mode,
-                "requestedAskMode": &requested_mode,
-                "planner": planner.clone(),
-                "englishQuestion": &english_question,
-                "originalQuestion": &original_question,
-                "provider": &task.provider,
-                "model": &task.model,
-                "stage": "planned",
-                "plannerLogPath": plan_log_path,
-                "plannerErrorLogPath": plan_error_log_path,
-                "finalLogPath": final_log_path,
-            },
-            "savedAt": now(),
-        }),
-    )?;
-    if planned_mode == "deep" {
-        let deep_response_file = base
-            .join("logs")
-            .join(format!("{}.deep.response.md", task.id));
-        let deep_log_path = base.join("logs").join(format!("{}.deep.out.log", task.id));
-        let deep_error_log_path = base.join("logs").join(format!("{}.deep.err.log", task.id));
-        let prompt = direct_deep_prompt(task, &english_question, &original_question);
-        let (exit_code, stdout, stderr, new_session_id, content) = run_agent_stage(
-            task,
-            resolved,
-            root,
-            &prompt,
-            &deep_response_file,
-            &deep_log_path,
-            &deep_error_log_path,
-            true,
-            true,
-        )?;
-        let provider_session_id = new_session_id.or(task.provider_session_id.clone());
-        let saw_agent_error_event = task.provider == "codex-cli"
-            && stdout.lines().any(|line| {
-                line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"")
-            });
-        let status = if exit_code == 0 && !content.trim().is_empty() {
-            "complete"
-        } else if !content.trim().is_empty() && !saw_agent_error_event {
-            "partial"
-        } else {
-            "failed"
-        };
-        let output = if content.trim().is_empty() {
-            if stderr.trim().is_empty() {
-                format!(
-                    "{} exited with code {exit_code} and returned no assistant message.",
-                    task.provider
-                )
-            } else {
-                stderr
-            }
-        } else {
-            content
-        };
-        let metadata = json!({
-            "id": &task.id,
-            "taskType": &task.task_type,
-            "documentId": &task.document_id,
-            "provider": &task.provider,
-            "model": &task.model,
-            "providerSessionId": &provider_session_id,
-            "status": status,
-            "output": output,
-            "payload": {
-                "askMode": "deep",
-                "requestedAskMode": requested_mode,
-                "planner": planner,
-                "englishQuestion": english_question,
-                "originalQuestion": original_question,
-                "provider": &task.provider,
-                "model": &task.model,
-                "exitCode": exit_code,
-                "plannerLogPath": plan_log_path,
-                "plannerErrorLogPath": plan_error_log_path,
-                "logPath": deep_log_path,
-                "errorLogPath": deep_error_log_path,
-                "finalLogPath": final_log_path,
-                "responseFile": deep_response_file,
-            },
-            "savedAt": now(),
-        });
-        finish_agent_task(base, task_file, task, metadata.clone())?;
-        return Ok(metadata);
-    }
-
-    let retrieval = run_sparse_retrieval(root, base, task, &planner)?;
-    let answer_response_file = base
-        .join("logs")
-        .join(format!("{}.fast-answer.response.md", task.id));
-    let answer_log_path = base
-        .join("logs")
-        .join(format!("{}.fast-answer.out.log", task.id));
-    let answer_error_log_path = base
-        .join("logs")
-        .join(format!("{}.fast-answer.err.log", task.id));
-    let answer_prompt = fast_answer_prompt(&planner, &retrieval, &original_question);
-    let (answer_exit_code, answer_stdout, answer_stderr, new_session_id, answer_content) =
-        run_agent_stage(
-            task,
-            resolved,
-            root,
-            &answer_prompt,
-            &answer_response_file,
-            &answer_log_path,
-            &answer_error_log_path,
-            false,
-            false,
-        )?;
-    let provider_session_id = new_session_id.or(task.provider_session_id.clone());
-    let parsed_answer = extract_json_object(&answer_content).unwrap_or_else(|_| {
-        json!({
-            "answerMarkdown": answer_content,
-            "evidenceSufficient": true,
-        })
-    });
-    let answer_markdown = json_string(&parsed_answer, "answerMarkdown");
-    let evidence_sufficient = parsed_answer
-        .get("evidenceSufficient")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let saw_agent_error_event = task.provider == "codex-cli"
-        && answer_stdout.lines().any(|line| {
-            line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"")
-        });
-    let status = if answer_exit_code == 0 && !answer_markdown.trim().is_empty() {
-        "complete"
-    } else if !answer_markdown.trim().is_empty() && !saw_agent_error_event {
-        "partial"
-    } else {
-        "failed"
-    };
-    let output = if answer_markdown.trim().is_empty() {
-        if answer_stderr.trim().is_empty() {
-            format!(
-                "{} exited with code {answer_exit_code} and returned no fast answer.",
-                task.provider
-            )
-        } else {
-            answer_stderr
+    mut run: impl FnMut(bool) -> AppResult<(i32, String, String)>,
+) -> AppResult<((i32, String, String), bool)> {
+    let first = run(true);
+    let has_session = task.task_type == "chatWithPaper"
+        && task
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let unavailable = match &first {
+        Ok((code, stdout, stderr)) => {
+            (*code != 0 || stdout.contains("\"type\":\"error\"") || stdout.contains("turn.failed"))
+                && is_unavailable_session_error(&format!("{stdout}\n{stderr}"))
         }
-    } else {
-        answer_markdown
+        Err(error) => is_unavailable_session_error(error),
     };
-    let metadata = json!({
-        "id": &task.id,
-        "taskType": &task.task_type,
-        "documentId": &task.document_id,
-        "provider": &task.provider,
-        "model": &task.model,
-        "providerSessionId": &provider_session_id,
-        "status": status,
-        "output": output,
-        "payload": {
-            "askMode": "fast",
-            "requestedAskMode": requested_mode,
-            "planner": planner,
-            "retrieval": retrieval,
-            "englishQuestion": english_question,
-            "originalQuestion": original_question,
-            "evidenceSufficient": evidence_sufficient,
-            "provider": &task.provider,
-            "model": &task.model,
-            "exitCode": answer_exit_code,
-            "plannerLogPath": plan_log_path,
-            "plannerErrorLogPath": plan_error_log_path,
-            "logPath": answer_log_path,
-            "errorLogPath": answer_error_log_path,
-            "finalLogPath": final_log_path,
-            "responseFile": answer_response_file,
-        },
-        "savedAt": now(),
-    });
-    finish_agent_task(base, task_file, task, metadata.clone())?;
-    Ok(metadata)
+    if has_session && unavailable {
+        return run(false).map(|output| (output, true));
+    }
+    first.map(|output| (output, false))
 }
 
 fn run_agent_task(
@@ -2942,36 +2629,41 @@ fn run_agent_task(
         }
     };
 
-    let ask_mode = task_ask_mode(&task);
-    if task.task_type == "chatWithPaper" && (ask_mode == "auto" || ask_mode == "fast") {
-        return run_planned_chat_task(root, base, task_file, &task, &resolved, final_log_path);
-    }
-
-    let args = if task.provider == "claude-code" {
-        claude_args(&task, root, true, true)
-    } else {
-        codex_args(
-            &task,
-            root,
-            &response_file,
-            image_path.as_deref(),
-            true,
-            true,
-        )
-    };
     let stdin_prompt = agent_stdin_prompt(&task, image_path.as_deref());
-    let command_display = format!(
-        "{} <prompt via stdin>",
-        command_line_display(&resolved, &args)
-    );
-    let (exit_code, stdout, stderr) = run_agent_command(
-        &resolved,
-        &args,
-        Some(&stdin_prompt),
-        root,
-        log_path,
-        error_log_path,
-    )?;
+    let mut command_display = String::new();
+    let ((exit_code, stdout, stderr), resumed_session_discarded) =
+        run_with_session_recovery(&task, |allow_resume| {
+            let args = if task.provider == "claude-code" {
+                claude_args(&task, root, allow_resume, true)
+            } else {
+                codex_args(
+                    &task,
+                    root,
+                    &response_file,
+                    image_path.as_deref(),
+                    allow_resume,
+                    true,
+                )
+            };
+            if !allow_resume && response_file.exists() {
+                fs::remove_file(&response_file).map_err(|error| error.to_string())?;
+            }
+            command_display = format!(
+                "{} <prompt via stdin>",
+                command_line_display(&resolved, &args)
+            );
+            run_agent_command(
+                &resolved,
+                &args,
+                Some(&stdin_prompt),
+                root,
+                log_path,
+                error_log_path,
+            )
+        })?;
+    if resumed_session_discarded {
+        task.provider_session_id = None;
+    }
     let (new_session_id, content) = if task.provider == "claude-code" {
         parse_claude_output(&stdout)
     } else {
@@ -3016,7 +2708,7 @@ fn run_agent_task(
         "status": status,
         "output": output,
         "payload": {
-            "askMode": task_ask_mode(&task),
+            "askMode": if task.task_type == "chatWithPaper" { "deep" } else { "" },
             "englishQuestion": task_payload_string(&task, "englishQuestion"),
             "originalQuestion": task_payload_string(&task, "originalQuestion"),
             "triggeredBy": task_payload_string(&task, "triggeredBy"),
@@ -3157,6 +2849,7 @@ fn start_bridge_worker(
     let stderr = File::create(&error_log_path).map_err(|error| error.to_string())?;
 
     let mut command = Command::new(&command_path);
+    configure_child_path(&mut command);
     command
         .arg("--paperdock-agent-worker")
         .arg("--project-root")
@@ -3258,6 +2951,41 @@ fn healthcheck(app: AppHandle) -> AppResult<Value> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn agent_process_preserves_unicode_stdin_and_paths_with_spaces() {
+        let root = env::temp_dir().join(format!("paper pilot 한글 {}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let resolved = ResolvedAgentCommand {
+            command: PathBuf::from("/bin/cat"),
+            args_prefix: vec![],
+            source: PathBuf::from("/bin/cat"),
+        };
+        let prompt = "한국어 질문과 PDF 경로 /Users/reader/My Papers/논문.pdf";
+        let (code, stdout, stderr) = run_agent_command(
+            &resolved,
+            &[],
+            Some(prompt),
+            &root,
+            &root.join("response.log"),
+            &root.join("error.log"),
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(stdout, prompt);
+        assert!(stderr.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mac_deep_chat_preserves_pdf_parent_with_spaces() {
+        let mut task = bridge_task_with_ask_mode("deep");
+        task.payload["document"]["filePath"] = json!("/Users/reader/My Papers/논문.pdf");
+        let mut args = Vec::new();
+        push_codex_chat_source_access_args(&mut args, &task);
+        assert_eq!(args, vec!["--add-dir", "/Users/reader/My Papers"]);
+    }
+
     #[test]
     fn decodes_cp949_process_output() {
         let bytes = [
@@ -3311,43 +3039,61 @@ mod tests {
     }
 
     #[test]
-    fn extracts_json_from_fenced_agent_output() {
-        let parsed = extract_json_object(
-            "```json\n{\"mode\":\"fast\",\"englishQuestion\":\"What is it?\"}\n```",
-        )
-        .expect("fenced JSON should parse");
-        assert_eq!(parsed["mode"], "fast");
-        assert_eq!(parsed["englishQuestion"], "What is it?");
+    fn missing_session_retries_once_without_resume() {
+        let task = bridge_task_with_ask_mode_and_session("deep", Some("missing-id"));
+        let mut calls = Vec::new();
+        let (output, discarded) = run_with_session_recovery(&task, |resume| {
+            calls.push(resume);
+            if resume {
+                Ok((
+                    1,
+                    String::new(),
+                    "No saved session found with ID missing-id".into(),
+                ))
+            } else {
+                Ok((0, "fresh answer".into(), String::new()))
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, vec![true, false]);
+        assert!(discarded);
+        assert_eq!(output.1, "fresh answer");
     }
 
     #[test]
-    fn forced_fast_planner_result_adds_retrieval_query() {
-        let normalized = normalize_planner_result(
-            json!({
-                "englishQuestion": "How does the method work?",
-                "mode": "deep"
-            }),
-            Some("fast"),
-            "fallback query",
-        );
-        assert_eq!(normalized["mode"], "fast");
-        assert_eq!(normalized["englishQuestion"], "How does the method work?");
-        assert_eq!(normalized["retrievalQueries"][0], "fallback query");
+    fn recovery_does_not_retry_auth_failures_or_fresh_sessions() {
+        for (session, error) in [
+            (Some("saved"), "authentication failed"),
+            (None, "session not found"),
+        ] {
+            let task = bridge_task_with_ask_mode_and_session("deep", session);
+            let mut calls = 0;
+            let (_, discarded) = run_with_session_recovery(&task, |_| {
+                calls += 1;
+                Ok((1, String::new(), error.into()))
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert!(!discarded);
+        }
     }
 
     #[test]
-    fn fast_codex_stage_does_not_add_pdf_access_args() {
-        let task = bridge_task_with_ask_mode("fast");
-        let args = codex_args(
-            &task,
-            Path::new("C:/workspace"),
-            Path::new("C:/workspace/response.md"),
-            None,
-            false,
-            false,
-        );
-        assert!(!args.iter().any(|arg| arg == "--add-dir"));
-        assert!(args.iter().any(|arg| arg == "read-only"));
+    fn recovery_retries_json_turn_failure_but_stops_after_second_failure() {
+        let task = bridge_task_with_ask_mode_and_session("deep", Some("saved"));
+        let mut calls = 0;
+        let (output, discarded) = run_with_session_recovery(&task, |_| {
+            calls += 1;
+            Ok((
+                1,
+                r#"{"type":"turn.failed","error":{"message":"thread does not exist"}}"#.into(),
+                String::new(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(discarded);
+        assert_eq!(output.0, 1);
     }
 
     #[test]
@@ -3436,14 +3182,23 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(OpenedPdfPaths::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            open_db(&app.handle())?;
+            let conn = open_db(&app.handle())?;
+            library_fs::migrate_stored_sources(&conn, &app_dir(&app.handle())?.join("documents"))?;
+            app.manage(obsidian::start_worker(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             healthcheck,
             load_app_state,
-            import_pdf,
+            load_library,
+            import_pdf_paths,
+            pick_pdfs,
+            relink_pdf,
+            take_opened_pdfs,
             read_document_bytes,
             update_document,
             delete_document,
@@ -3459,8 +3214,11 @@ pub fn run() {
             delete_citation_card,
             save_ai_result,
             save_pdf_file,
+            save_export_file,
+            open_external_url,
             save_recommendation_run,
             set_setting,
+            set_settings,
             reset_workspace_files,
             write_bridge_task,
             read_bridge_result,
@@ -3470,7 +3228,33 @@ pub fn run() {
             export_document_json,
             export_document_zip,
             delete_ai_results,
+            obsidian::obsidian_status,
+            obsidian::obsidian_pick_vault,
+            obsidian::obsidian_configure,
+            obsidian::obsidian_sync_now,
+            obsidian::obsidian_resolve,
+            obsidian::obsidian_reconnect,
+            obsidian::obsidian_open,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = event {
+                let opened = app.state::<OpenedPdfPaths>();
+                if let Ok(mut pending) = opened.0.lock() {
+                    for path in urls.into_iter().filter_map(|url| url.to_file_path().ok()) {
+                        if path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                            && !pending.contains(&path)
+                        {
+                            pending.push(path);
+                        }
+                    }
+                }
+                let _ = app.emit("paper-pilot:opened-pdf", ());
+            }
+        });
 }

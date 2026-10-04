@@ -3,6 +3,7 @@
 
 # Frontend build output
 /dist/
+/.dev-run/
 
 # Tauri / Rust build output
 /src-tauri/target/
@@ -72,3 +73,7 @@ ehthumbs.db
 Desktop.ini
 .idea/
 .vscode/
+
+# Local Python retrieval environment
+/.venv/
+__pycache__/

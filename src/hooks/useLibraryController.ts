@@ -3,7 +3,7 @@ import type { AppStateRecord, DocumentRecord, FolderRecord, WorkspaceMode } from
 import { deleteDocumentScopedSettings } from "../lib/documentSettings";
 import { documentFolderId, folderDescendantIds, folderPathLabel } from "../lib/libraryTree";
 import { makeId, nowIso } from "../lib/ids";
-import { deleteDocument, deleteFolders, updateDocument, upsertFolder } from "../lib/tauri";
+import { deleteDocument, deleteFolders, updateDocument, upsertFolder, loadLibrary, isTauriRuntime } from "../lib/tauri";
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import type { OutlineAnchor, OutlineRow } from "../lib/outlines";
 import type { UiStrings } from "../lib/uiStrings";
@@ -37,6 +37,12 @@ export function useLibraryController(input: LibraryControllerInput) {
     const existing = new Set(input.state.documents.map((document) => document.id));
     setSelectedDocumentIds((current) => current.filter((id) => existing.has(id)));
   }, [input.state.documents]);
+
+  useEffect(() => {
+    if (folderFilter !== "all" && !input.state.folders.some((folder) => folder.id === folderFilter)) {
+      setFolderFilter("root");
+    }
+  }, [folderFilter, input.state.folders]);
 
   const filteredDocuments = useMemo(() => {
     const query = libraryQuery.trim().toLowerCase();
@@ -165,7 +171,9 @@ export function useLibraryController(input: LibraryControllerInput) {
     for (const id of ids) {
       await deleteDocument(id);
     }
+    const library = isTauriRuntime() ? await loadLibrary() : null;
     input.patchState((draft) => {
+      if (library) draft.folders = library.folders;
       draft.documents = draft.documents.filter((item) => !ids.has(item.id));
       draft.pages = draft.pages.filter((item) => !ids.has(item.documentId));
       draft.annotations = draft.annotations.filter((item) => !ids.has(item.documentId));

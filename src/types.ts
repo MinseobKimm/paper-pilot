@@ -28,6 +28,7 @@ export type FolderRecord = {
   parentId: string | null;
   name: string;
   createdAt: string;
+  sourcePath?: string | null;
 };
 
 export type DocumentRecord = {
@@ -35,6 +36,7 @@ export type DocumentRecord = {
   title: string;
   fileName: string;
   filePath: string;
+  sourcePath?: string | null;
   hash: string;
   pageCount: number;
   authors: string;

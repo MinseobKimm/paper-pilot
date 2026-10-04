@@ -1,12 +1,16 @@
 const exactDocumentSettingPrefixes = [
+  "paperChatExcludedResults:",
   "documentZoom:",
   "documentScrollLeft:",
   "readerBookmarks:",
   "readerLastViewport:",
   "pageTextLayoutAiVersion:",
+  "pdfTextExtractionVersion:",
   "documentOutlineVersion:",
   "readingStatus:",
   "documentWordList:",
+  "documentAutoTranslate:",
+  "documentWordMeaningLookup:",
 ];
 
 const pagedDocumentSettingPrefixes = [

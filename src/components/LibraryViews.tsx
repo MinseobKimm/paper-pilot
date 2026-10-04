@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type WheelEvent } from "react";
-import { Archive, BookOpen, Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, FileText, FolderOpen, FolderPlus, Grid2X2, List, PenLine, Search, Trash2, Upload, X } from "./icons";
+import { Archive, BookOpen, Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, FileText, FolderOpen, FolderPlus, Grid2X2, List, MoreVertical, PenLine, Search, Trash2, Upload, X } from "./icons";
 import type { AppStateRecord, DocumentRecord, FolderRecord, NoteRecord } from "../types";
 import { documentFolderId, folderDescendantIds, folderDisplayName, folderPathLabel, folderTreeRows, sortedFolderChildren } from "../lib/libraryTree";
 import { readingStatusFromSettings, readingStatusOption, readingStatusOptions, type ReadingStatus } from "../lib/readingStatus";
 import { useUiStrings } from "../lib/uiStrings";
+import { isTauriRuntime } from "../lib/tauri";
 
 const graphViewportWidth = 1040;
 const graphViewportHeight = 640;
@@ -523,9 +524,6 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
     if (queryActive) {
       return props.documents;
     }
-    if (currentFolderId === "root") {
-      return [];
-    }
     return props.state.documents.filter((document) => documentFolderId(document) === currentFolderId);
   }, [currentFolderId, props.documents, props.state.documents, queryActive]);
   const graphDocuments = props.documents;
@@ -555,16 +553,16 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
         <div className="upload-target" onClick={props.onPickFile} role="button" tabIndex={0}>
           <Upload size={26} />
           <strong>{ui.addPdf}</strong>
-          <span>{ui.addPdfToSelectedFolder}</span>
+          <span>{isTauriRuntime() ? ui.originalFolderLibrary : ui.addPdfToSelectedFolder}</span>
         </div>
         <div className="folder-tools">
           <div className="folder-tools-head">
             <strong>{ui.folders}</strong>
-            <button title={ui.createUnderCurrentFolder} className="icon-button" onClick={() => props.onCreateFolder(currentParentId)}>
+            {!isTauriRuntime() && <button title={ui.createUnderCurrentFolder} className="icon-button" onClick={() => props.onCreateFolder(currentParentId)}>
               <FolderPlus size={16} />
-            </button>
+            </button>}
           </div>
-          <div className="inline-input">
+          {!isTauriRuntime() && <div className="inline-input">
             <input
               value={props.newFolderName}
               onChange={(event) => props.onNewFolderName(event.target.value)}
@@ -573,7 +571,7 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
             <button title={ui.createFolder} className="icon-button" onClick={() => props.onCreateFolder(currentParentId)}>
               <FolderPlus size={17} />
             </button>
-          </div>
+          </div>}
           <button
             className={currentFolderId === "root" ? "folder-row active" : "folder-row"}
             onClick={() => props.onFolderFilter("root")}
@@ -592,13 +590,13 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
                 <button
                   className={props.folderFilter === row.folder.id ? "folder-row active" : "folder-row"}
                   onClick={() => props.onFolderFilter(row.folder.id)}
-                  title={folderPathLabel(props.state.folders, row.folder.id, ui)}
+                  title={row.folder.sourcePath || folderPathLabel(props.state.folders, row.folder.id, ui)}
                 >
                   {row.childCount > 0 ? <ChevronRight size={13} /> : <span className="folder-row-spacer" />}
                   <FolderOpen size={16} />
                   <span className="folder-label">{folderDisplayName(row.folder, ui)}</span>
                   </button>
-                <div className="folder-row-actions">
+                {!isTauriRuntime() && <div className="folder-row-actions">
                   <button data-folder-action="create-child" title={ui.createChildFolder} onClick={() => props.onCreateChildFolder(row.folder.id)}>
                     <FolderPlus size={13} />
                   </button>
@@ -612,7 +610,7 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
                       <Trash2 size={13} />
                     </button>
                   )}
-                </div>
+                </div>}
               </div>
             ))}
           </div>
@@ -684,7 +682,7 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
             />
             <span>{selectedVisibleIds.length ? `${selectedVisibleIds.length} ${ui.selectedSuffix}` : ui.currentListSelect}</span>
           </label>
-          <select
+          {!isTauriRuntime() && <select
             aria-label={ui.moveSelectedPapers}
             defaultValue=""
             disabled={props.selectedDocumentIds.length === 0}
@@ -702,7 +700,7 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
                 {folder.label}
               </option>
             ))}
-          </select>
+          </select>}
           <button className="icon-button with-label danger" disabled={props.selectedDocumentIds.length === 0} onClick={() => props.onDeleteDocuments(props.selectedDocumentIds)}>
             <Trash2 size={15} />
             <span>{ui.delete}</span>
@@ -726,6 +724,8 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
             onToggleSelect={props.onToggleSelect}
             onOpen={(document) => props.onOpen(document)}
             onToggleBookmark={props.onToggleBookmark}
+            onRename={props.onRenameDocument}
+            onDelete={(document) => props.onDeleteDocuments([document.id])}
           />
         ) : graphDocuments.length === 0 ? (
           <div className="library-graph-shell">
@@ -785,6 +785,8 @@ function LibraryExplorerView(props: {
   onToggleSelect: (id: string, selected: boolean) => void;
   onOpen: (document: DocumentRecord) => void;
   onToggleBookmark: (document: DocumentRecord) => void;
+  onRename: (document: DocumentRecord) => void;
+  onDelete: (document: DocumentRecord) => void;
 }) {
   const ui = useUiStrings();
   const isEmpty = props.folders.length === 0 && props.documents.length === 0;
@@ -840,6 +842,10 @@ function LibraryExplorerView(props: {
                   className={selected ? "library-file-row selected" : "library-file-row"}
                   title={document.title || document.fileName}
                   onClick={() => props.onDocument(document)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.currentTarget.querySelector(".library-file-menu")?.setAttribute("open", "");
+                  }}
                 >
                   <label className="file-select" onClick={(event) => event.stopPropagation()}>
                     <input
@@ -885,6 +891,33 @@ function LibraryExplorerView(props: {
                     >
                       <BookOpen size={16} />
                     </button>
+                    <details className="library-file-menu" onClick={(event) => event.stopPropagation()}>
+                      <summary className="icon-button" aria-label={ui.more} title={ui.more}>
+                        <MoreVertical size={16} />
+                      </summary>
+                      <div className="library-file-menu-popover">
+                        <button onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          props.onOpen(document);
+                        }}>{ui.open}</button>
+                        <button onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          props.onDocument(document);
+                        }}>{ui.documentInfo}</button>
+                        <button onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          props.onRename(document);
+                        }}>{ui.rename}</button>
+                        <button onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          props.onToggleBookmark(document);
+                        }}>{document.bookmarked ? ui.removeBookmark : ui.bookmark}</button>
+                        <button className="danger" onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          props.onDelete(document);
+                        }}>{ui.delete}</button>
+                      </div>
+                    </details>
                   </div>
                 </article>
               );
@@ -896,7 +929,7 @@ function LibraryExplorerView(props: {
       {isEmpty && (
         <div className="empty-list explorer-empty">
           <FolderOpen size={30} />
-          <strong>{props.currentFolderId === "root" && !props.queryActive ? "폴더가 없습니다" : ui.noPaperInView}</strong>
+          <strong>{ui.noPaperInView}</strong>
           <span>{ui.addPdfOrChooseFolder}</span>
         </div>
       )}

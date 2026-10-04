@@ -1,4 +1,10 @@
-export function downloadText(fileName: string, text: string, type = "application/json") {
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "./tauri";
+
+export async function downloadText(fileName: string, text: string, type = "application/json") {
+  if (isTauriRuntime()) {
+    return invoke<string | null>("save_export_file", { suggestedFileName: safeFileName(fileName), bytes: Array.from(new TextEncoder().encode(text)) });
+  }
   const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");

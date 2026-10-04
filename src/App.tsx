@@ -19,8 +19,8 @@ import { useWordMeaningController } from "./hooks/useWordMeaningController";
 import { useReaderLayout } from "./hooks/useReaderLayout";
 import { useReaderSelection } from "./hooks/useReaderSelection";
 import { useReaderViewportSync } from "./hooks/useReaderViewportSync";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type SetStateAction } from "react";
 import type { PdfDocumentProxy } from "./lib/pdfDocument";
 import { isAgentProvider, normalizeAiProviderKind, runAiTask } from "./lib/ai";
@@ -35,7 +35,9 @@ import {
 import {
   clampNumber,
   defaultReaderZoom,
+  documentAutoTranslateSettingKey,
   documentReaderBookmarksSettingKey,
+  documentWordMeaningLookupSettingKey,
   lastReaderViewportFromSettings,
   pageTextLayoutConfidenceSettingKey,
   pageTextLayoutSettingKey,
@@ -61,7 +63,6 @@ import {
   smartSentenceParts,
   stalePendingTranslationMs,
   translationRequestKey,
-  translationResultsForPage,
 } from "./lib/translations";
 import {
   flattenPdfOutlineRows,
@@ -85,9 +86,9 @@ import {
 } from "./lib/wordMeanings";
 import { inferYear, initialState, wordMeaningLookupEnabled } from "./lib/appState";
 import {
-  chatInputTextWithMode,
   getReadableAiOutput,
   latestProviderSessionId,
+  paperChatExcludedResultIds,
   stripChatAskPrefix,
   taskTitle,
   wordMeaningTaskType,
@@ -95,14 +96,22 @@ import {
 import { compactUiText } from "./lib/fileActions";
 import { readingStatusSettingKey, type ReadingStatus } from "./lib/readingStatus";
 import {
-  deleteAiResults,
   importPdf,
+  importPdfPaths,
+  obsidianConfigure,
+  obsidianPickVault,
+  obsidianSyncNow,
+  pickPdfs,
+  loadLibrary,
   isTauriRuntime,
   readDocumentBytes,
+  relinkPdf,
   resetWorkspaceFiles,
   savePages,
   setSetting,
+  setSettings,
   startBridgeWorker,
+  takeOpenedPdfs,
   updateDocument,
   upsertNote,
 } from "./lib/tauri";
@@ -119,7 +128,10 @@ import type {
   DocumentContextPack,
   WorkspaceMode,
 } from "./types";
+import { installWebKitStreamCompatibility } from "./lib/webkitCompat";
+import { pdfTextExtractionVersion, pdfTextExtractionVersionKey } from "./lib/pdfText";
 
+installWebKitStreamCompatibility();
 (pdfjsLib as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc =
   pdfWorkerUrl;
 
@@ -182,6 +194,10 @@ type ViewportRect = {
 
 function App() {
   const [state, setState] = useState<AppStateRecord>(initialState);
+  const [startupReady, setStartupReady] = useState(false);
+  const finderOpenHandlerRef = useRef<(document: DocumentRecord) => Promise<void>>(async () => {});
+  const finderDrainRunningRef = useRef(false);
+  const finderDrainRequestedRef = useRef(false);
   const [mode, setMode] = useState<WorkspaceMode>("library");
   const modeBeforeSettingsRef = useRef<Exclude<WorkspaceMode, "settings">>("library");
   const [activePanel, setActivePanel] = useState<PanelTab>("ai");
@@ -208,6 +224,8 @@ function App() {
   const [rightPanelOpen, setRightPanelOpenState] = useState(() =>
     settingsBoolean(initialState.settings, readerRightPanelOpenSettingKey, true),
   );
+  const [fitPageWithPanel, setFitPageWithPanel] = useState(true);
+  const [fittedZoom, setFittedZoom] = useState<number | null>(null);
   const [translationPanelOpen, setTranslationPanelOpenState] = useState(() =>
     settingsBoolean(initialState.settings, readerTranslationPanelOpenSettingKey, false),
   );
@@ -356,17 +374,6 @@ function App() {
     });
   }, []);
 
-  const removeAiResultsFromState = useCallback((ids: string[]) => {
-    if (ids.length === 0) {
-      return;
-    }
-    setState((current) => {
-      const remove = new Set(ids);
-      const aiResults = current.aiResults.filter((item) => !remove.has(item.id));
-      return aiResults.length === current.aiResults.length ? current : { ...current, aiResults };
-    });
-  }, []);
-
   const showToast = useCallback((message: string, kind: ToastMessage["kind"] = "info") => {
     if (toastTimerRef.current !== null) {
       window.clearTimeout(toastTimerRef.current);
@@ -386,6 +393,7 @@ function App() {
     setActiveDocumentId,
     setAgentStatuses,
     showToast,
+    onLoaded: () => setStartupReady(true),
   });
 
   const {
@@ -435,6 +443,11 @@ function App() {
     [activeDocumentId, state.settings],
   );
   const activePdfDocument = activeDocumentId && activeDocumentId === loadedDocumentId ? pdfDocument : null;
+  const displayZoom = rightPanelOpen && fitPageWithPanel && fittedZoom !== null ? Math.min(zoom, fittedZoom) : zoom;
+
+  useEffect(() => {
+    setFitPageWithPanel(true);
+  }, [rightPanelOpen, activeDocumentId]);
 
   useEffect(() => {
     if (!activeDocumentId || activeDocumentId !== loadedDocumentId || !state.documents.some((document) => document.id === activeDocumentId)) {
@@ -498,9 +511,6 @@ function App() {
     const existingSource = settings[sourceKey] || "";
     const existingConfidence = Number(settings[confidenceKey] || "0");
     const nextConfidence = Math.max(0, Math.min(1, inference.confidence));
-    if (existingSource === "ai" && source !== "ai") {
-      return false;
-    }
     return !(
       settings[layoutKey] === inference.mode &&
       existingSource === source &&
@@ -561,11 +571,53 @@ function App() {
     );
   }
 
+  function clearDocumentPageCaches(documentId: string) {
+    const shouldRemove = (key: string) => [
+      `pdfTextExtractionVersion:${documentId}`,
+      `documentOutlineVersion:${documentId}`,
+      `pageTextLayoutAiVersion:${documentId}`,
+    ].includes(key) || [
+      `pageTextLayout:${documentId}:`,
+      `pageTextLayoutConfidence:${documentId}:`,
+      `pageTextLayoutSource:${documentId}:`,
+    ].some((prefix) => key.startsWith(prefix));
+    const settings = { ...stateRef.current.settings };
+    for (const key of Object.keys(settings)) if (shouldRemove(key)) delete settings[key];
+    stateRef.current = {
+      ...stateRef.current,
+      settings,
+      pages: stateRef.current.pages.filter((page) => page.documentId !== documentId),
+    };
+    patchState((draft) => {
+      draft.pages = draft.pages.filter((page) => page.documentId !== documentId);
+      for (const key of Object.keys(draft.settings)) if (shouldRemove(key)) delete draft.settings[key];
+    });
+  }
+
   async function loadPdfBytes(document: DocumentRecord, bytes?: Uint8Array) {
-    const lastViewport = lastReaderViewportFromSettings(state.settings, document.id);
+    const settings = stateRef.current.settings;
+    const autoKey = documentAutoTranslateSettingKey(document.id);
+    const wordKey = documentWordMeaningLookupSettingKey(document.id);
+    const autoTranslate = settings[autoKey] === "true" ? "true" : "false";
+    const wordMeaning = settings[wordKey] === "false" ? "false" : "true";
+    const nextSettings = {
+      ...settings,
+      autoTranslate,
+      wordMeaningLookupEnabled: wordMeaning,
+      [autoKey]: autoTranslate,
+      [wordKey]: wordMeaning,
+    };
+    stateRef.current = { ...stateRef.current, settings: nextSettings };
+    patchState((draft) => {
+      draft.settings.autoTranslate = autoTranslate;
+      draft.settings.wordMeaningLookupEnabled = wordMeaning;
+      draft.settings[autoKey] = autoTranslate;
+      draft.settings[wordKey] = wordMeaning;
+    });
+    const lastViewport = lastReaderViewportFromSettings(nextSettings, document.id);
     const initialPage = lastViewport?.page ?? 1;
     setMode("reader");
-    if (!bytes && activeDocumentId === document.id && loadedDocumentId === document.id && pdfDocument) {
+    if (!isTauriRuntime() && !bytes && activeDocumentId === document.id && loadedDocumentId === document.id && pdfDocument) {
       setPageCursor(initialPage);
       return;
     }
@@ -573,7 +625,51 @@ function App() {
     setActiveDocumentId(document.id);
     setPageCursor(initialPage);
     try {
-      const pdfBytes = bytes ?? (await readDocumentBytes(document.id));
+      try {
+        await setSettings([
+          ["autoTranslate", autoTranslate],
+          ["wordMeaningLookupEnabled", wordMeaning],
+          [autoKey, autoTranslate],
+          [wordKey, wordMeaning],
+        ]);
+      } catch (error) {
+        showToast(String(error), "error");
+      }
+      let pdfBytes = bytes;
+      if (!pdfBytes) {
+        try {
+          pdfBytes = await readDocumentBytes(document.id);
+        } catch (error) {
+          if (!isTauriRuntime()) throw error;
+          const failure = String(error);
+          let relinked: DocumentRecord | null;
+          if (failure.includes("PDF_SOURCE_MISSING:")) {
+            showToast(uiLanguage === "ko"
+              ? "원본 PDF를 찾을 수 없습니다. 새 위치의 같은 파일을 선택해 주세요."
+              : "The original PDF is missing. Select the same file at its new location.");
+            relinked = await relinkPdf(document.id);
+          } else if (failure.includes("PDF_SOURCE_CHANGED:") && document.sourcePath) {
+            const confirmed = window.confirm(uiLanguage === "ko"
+              ? "원본 PDF의 내용이 바뀌었습니다. 새 내용으로 열까요? 기존 주석의 위치가 어긋날 수 있습니다."
+              : "The original PDF has changed. Open the new version? Existing annotations may no longer align.");
+            relinked = confirmed ? (await importPdfPaths([document.sourcePath]))[0] ?? null : null;
+            if (relinked) clearDocumentPageCaches(document.id);
+          } else {
+            throw error;
+          }
+          if (!relinked) {
+            setMode("library");
+            setActiveDocumentId(null);
+            return;
+          }
+          document = relinked;
+          patchState((draft) => {
+            draft.documents = draft.documents.map((item) => item.id === relinked.id ? relinked : item);
+          });
+          await refreshLibrary();
+          pdfBytes = await readDocumentBytes(document.id);
+        }
+      }
       setLoadedBytes(pdfBytes);
       setPageImages({});
       setPdfOutlineRows([]);
@@ -625,6 +721,13 @@ function App() {
           draft.documents = draft.documents.map((item) => (item.id === saved.id ? saved : item));
         });
       }
+      const extractionVersionKey = pdfTextExtractionVersionKey(document.id);
+      if (stateRef.current.settings[extractionVersionKey] !== pdfTextExtractionVersion) {
+        const pages = await extractOrderedPagesFromPdf(updated, pdf);
+        await replaceExtractedPages(document.id, pages);
+        await setSetting(extractionVersionKey, pdfTextExtractionVersion);
+        patchState((draft) => { draft.settings[extractionVersionKey] = pdfTextExtractionVersion; });
+      }
       setLoadedDocumentId(document.id);
       setPdfDocument(pdf);
     } catch (error) {
@@ -634,7 +737,145 @@ function App() {
     }
   }
 
+  finderOpenHandlerRef.current = async (document) => {
+    const previous = stateRef.current.documents.find((item) => item.id === document.id);
+    if (previous && previous.hash !== document.hash) clearDocumentPageCaches(document.id);
+    patchState((draft) => {
+      draft.documents = [document, ...draft.documents.filter((item) => item.id !== document.id)];
+    });
+    await refreshLibrary();
+    await loadPdfBytes(document);
+  };
+
+  const refreshLibrary = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    const library = await loadLibrary();
+    patchState((draft) => {
+      draft.folders = library.folders;
+      draft.documents = draft.documents.map((document) => {
+        const current = library.documents.find((item) => item.id === document.id);
+        return current ? { ...document, folderId: current.folderId, sourcePath: current.sourcePath, filePath: current.filePath, hash: current.hash } : document;
+      });
+    });
+  }, [patchState]);
+
+  useEffect(() => {
+    if (!startupReady || mode !== "library" || !isTauriRuntime()) return;
+    let running = false;
+    const refresh = () => {
+      if (running) return;
+      running = true;
+      void refreshLibrary().catch((error) => showToast(String(error), "error")).finally(() => { running = false; });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [mode, startupReady, refreshLibrary, showToast]);
+
+  async function acceptDesktopPdfs(documents: DocumentRecord[]) {
+    for (const document of documents) {
+      const previous = stateRef.current.documents.find((item) => item.id === document.id);
+      if (previous && previous.hash !== document.hash) clearDocumentPageCaches(document.id);
+    }
+    patchState((draft) => {
+      const imported = new Map(documents.map((document) => [document.id, document]));
+      draft.documents = [...imported.values(), ...draft.documents.filter((document) => !imported.has(document.id))];
+    });
+    await refreshLibrary();
+    for (const document of documents) await loadPdfBytes(document);
+  }
+
+  async function pickPdfFiles() {
+    if (!isTauriRuntime()) {
+      fileInputRef.current?.click();
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const documents = await pickPdfs();
+      if (documents.length) await acceptDesktopPdfs(documents);
+    } catch (error) {
+      showToast(`${ui.importFailedPrefix}: ${String(error)}`, "error");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  const desktopDropHandlerRef = useRef<(paths: string[]) => Promise<void>>(async () => {});
+  desktopDropHandlerRef.current = async (paths) => {
+    const pdfPaths = paths.filter((path) => /\.pdf$/i.test(path));
+    setDragActive(false);
+    if (!pdfPaths.length) return;
+    setIsBusy(true);
+    try {
+      await acceptDesktopPdfs(await importPdfPaths(pdfPaths));
+    } catch (error) {
+      showToast(`${ui.importFailedPrefix}: ${String(error)}`, "error");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!startupReady || !isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
+        void desktopDropHandlerRef.current(event.payload.paths);
+      }))
+      .then((stop) => { if (cancelled) stop(); else unlisten = stop; })
+      .catch((error) => showToast(String(error), "error"));
+    return () => { cancelled = true; unlisten?.(); };
+  }, [startupReady, showToast]);
+
+  useEffect(() => {
+    if (!startupReady || !isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    const drain = async () => {
+      if (finderDrainRunningRef.current) {
+        finderDrainRequestedRef.current = true;
+        return;
+      }
+      finderDrainRunningRef.current = true;
+      try {
+        let documents: DocumentRecord[];
+        do {
+          finderDrainRequestedRef.current = false;
+          documents = await takeOpenedPdfs();
+          for (const document of documents) {
+            if (cancelled) return;
+            await finderOpenHandlerRef.current(document);
+          }
+        } while (!cancelled && (documents.length > 0 || finderDrainRequestedRef.current));
+      } catch (error) {
+        showToast(String(error), "error");
+      } finally {
+        finderDrainRunningRef.current = false;
+      }
+    };
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("paper-pilot:opened-pdf", () => void drain()))
+      .then((stop) => {
+        if (cancelled) stop();
+        else {
+          unlisten = stop;
+          void drain();
+        }
+      })
+      .catch((error) => showToast(String(error), "error"));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [startupReady, showToast]);
+
   async function handleFiles(files: FileList | File[]) {
+    if (isTauriRuntime()) {
+      await pickPdfFiles();
+      return;
+    }
     const pdfFiles = Array.from(files).filter((file) => file.type === "application/pdf" || file.name.endsWith(".pdf"));
     if (pdfFiles.length === 0) {
       showToast(ui.dropOrChoosePdf);
@@ -742,14 +983,12 @@ function App() {
     const optimisticChatId =
       taskType === "chatWithPaper" && typeof payload.question === "string" ? makeId("chat-pending") : "";
     if (optimisticChatId) {
-      const requestedAskMode = typeof payload.askMode === "string" ? payload.askMode : "auto";
-      const askMode = requestedAskMode === "direct" ? "deep" : requestedAskMode;
       const question = typeof payload.question === "string" ? payload.question.trim() : "";
       upsertAiResultInState({
         id: optimisticChatId,
         documentId: activeDocument.id,
         taskType,
-        inputText: chatInputTextWithMode(question, askMode),
+        inputText: question,
         outputText: "",
         status: "pending",
         createdAt: nowIso(),
@@ -780,9 +1019,8 @@ function App() {
         const contextPack =
           (taskPayload.documentContextPack as DocumentContextPack | undefined) ??
           buildDocumentContextPack(activeDocument, chatPages.length ? chatPages : pages, activeOutlineRows);
-        const askMode = typeof taskPayload.askMode === "string" ? taskPayload.askMode : "auto";
         taskPayload.documentContextPack = contextPack;
-        taskPayload.askMode = askMode === "direct" ? "deep" : askMode;
+        taskPayload.askMode = "deep";
       }
       if (taskType === "translatePage" && !taskPayload.text && typeof taskPayload.page === "number") {
         taskPayload.text = pages.find((page) => page.pageNumber === taskPayload.page)?.text ?? "";
@@ -795,6 +1033,7 @@ function App() {
           ? latestProviderSessionId(
               activeAiResults.filter((result) => result.taskType.toString() === "chatWithPaper"),
               providerKind,
+              paperChatExcludedResultIds(state.settings[`paperChatExcludedResults:${activeDocument.id}`]),
             )
           : "");
       const queued = await runAiTask(providerKind, bridgePath, taskType, activeDocument, {
@@ -944,14 +1183,7 @@ function App() {
   }
 
   async function refreshTranslationForPage(page: PageRecord) {
-    const targetLanguage = translationLanguageNameFromSettings(state.settings);
-    const existingIds = translationResultsForPage(activeAiResults, page, targetLanguage).map((result) => result.id);
-    const queued = await queueTranslationForPage(page, { silent: false, force: true });
-    if (!queued || existingIds.length === 0) {
-      return;
-    }
-    await deleteAiResults(existingIds);
-    removeAiResultsFromState(existingIds);
+    await queueTranslationForPage(page, { silent: false, force: true });
   }
 
   const {
@@ -1185,6 +1417,7 @@ function App() {
     createManualHighlight,
     addCommentFromSelection,
     explainSelection,
+    openSentenceActions,
   } = useReaderSelection({
     activeDocument,
     activePages,
@@ -1223,41 +1456,17 @@ function App() {
     ensureActivePages,
   });
 
-  async function queueDeepReadAfterInsufficientFast(result: AiResultRecord, metadata: Record<string, unknown>) {
-    const payload = metadata.payload && typeof metadata.payload === "object" ? (metadata.payload as Record<string, unknown>) : {};
-    if (payload.askMode !== "fast" || payload.evidenceSufficient !== false) {
-      return;
+  async function startNewPaperChat() {
+    if (!activeDocument) return;
+    const key = `paperChatExcludedResults:${activeDocument.id}`;
+    const value = JSON.stringify(activeAiResults.filter((result) => result.taskType === "chatWithPaper").map((result) => result.id));
+    try {
+      await setSettings([[key, value]]);
+      patchState((draft) => { draft.settings[key] = value; });
+      showToast(ui.newChatStarted);
+    } catch (error) {
+      showToast(String(error));
     }
-    const englishQuestion =
-      typeof payload.englishQuestion === "string" && payload.englishQuestion.trim()
-        ? payload.englishQuestion.trim()
-        : stripChatAskPrefix(result.inputText);
-    const originalQuestion =
-      typeof payload.originalQuestion === "string" && payload.originalQuestion.trim()
-        ? payload.originalQuestion.trim()
-        : stripChatAskPrefix(result.inputText);
-    const duplicateQuestions = new Set([englishQuestion, originalQuestion].filter(Boolean));
-    const hasDuplicatePendingDeepRead = activeAiResults.some(
-      (item) =>
-        item.status === "pending" &&
-        item.taskType.toString() === "chatWithPaper" &&
-        duplicateQuestions.has(stripChatAskPrefix(item.inputText)),
-    );
-    if (hasDuplicatePendingDeepRead) {
-      return;
-    }
-    await queueTask(
-      "chatWithPaper",
-      {
-        question: englishQuestion,
-        englishQuestion,
-        originalQuestion,
-        askMode: "deep",
-        triggeredBy: "fast-insufficient",
-        parentResultId: result.id,
-      },
-      { silent: true, keepPanel: true },
-    );
   }
 
   const {
@@ -1281,7 +1490,6 @@ function App() {
     setFloatingResultId,
     saveWordMeaningsFromResult,
     saveDocumentLayoutFromResult,
-    onFastEvidenceInsufficient: queueDeepReadAfterInsufficientFast,
   });
 
   function sentencePageFromId(id: string) {
@@ -1523,7 +1731,7 @@ function App() {
       onDrop={(event) => {
         event.preventDefault();
         setDragActive(false);
-        void handleFiles(event.dataTransfer.files);
+        if (!isTauriRuntime()) void handleFiles(event.dataTransfer.files);
       }}
     >
       <main className="workspace">
@@ -1531,7 +1739,9 @@ function App() {
           ui={ui}
           mode={mode}
           document={activeDocument}
-          zoom={zoom}
+          zoom={displayZoom}
+          fitAvailable={rightPanelOpen && Boolean(activePdfDocument)}
+          fitToWidth={rightPanelOpen && fitPageWithPanel && fittedZoom !== null && zoom > fittedZoom}
           pageCursor={pageCursor}
           pageCount={activePdfDocument?.numPages ?? activeDocument?.pageCount ?? 0}
           searchTerm={searchTerm}
@@ -1541,13 +1751,14 @@ function App() {
           shareReady={Boolean(activeDocument && (activePdfDocument || Object.keys(pageImages).length > 0))}
           onOpenLibrary={openLibraryMode}
           onOpenSettings={toggleSettingsMode}
-          onZoomIn={() => commitZoomKeepingView(zoom + 0.1)}
-          onZoomOut={() => commitZoomKeepingView(zoom - 0.1)}
+          onZoomIn={() => { setFitPageWithPanel(false); commitZoomKeepingView(displayZoom + 0.1); }}
+          onZoomOut={() => { setFitPageWithPanel(false); commitZoomKeepingView(displayZoom - 0.1); }}
           onPageChange={(page) => goToPage(page)}
           onSearch={setSearchTerm}
           onTogglePanel={() => setRightPanelOpen((value) => !value)}
           onToggleTranslationPanel={() => setTranslationPanelOpen((value) => !value)}
-          onZoomChange={commitZoomKeepingView}
+          onZoomChange={(value) => { setFitPageWithPanel(false); commitZoomKeepingView(value); }}
+          onFitToWidth={() => setFitPageWithPanel(true)}
           onShowOutline={() => {
             if (mode === "reader") {
               setOutlineOpen((value) => !value);
@@ -1568,10 +1779,12 @@ function App() {
           }}
           onToggleAutoTranslate={() => {
             const next = state.settings.autoTranslate === "true" ? "false" : "true";
+            const documentKey = activeDocument ? documentAutoTranslateSettingKey(activeDocument.id) : null;
             patchState((draft) => {
               draft.settings.autoTranslate = next;
+              if (documentKey) draft.settings[documentKey] = next;
             });
-            void setSetting("autoTranslate", next);
+            void setSettings(documentKey ? [["autoTranslate", next], [documentKey, next]] : [["autoTranslate", next]]);
           }}
           onShareFile={() => void shareAnnotatedFile()}
           autoTranslate={state.settings.autoTranslate === "true"}
@@ -1603,7 +1816,7 @@ function App() {
             onCreateChildFolder={(parentId) => void createChildFolder(parentId)}
             onRenameFolder={(folder) => void renameFolder(folder)}
             onDeleteFolder={(folder) => void deleteFolderTree(folder)}
-            onPickFile={() => fileInputRef.current?.click()}
+            onPickFile={() => void pickPdfFiles()}
             onOpen={(document) => void loadPdfBytes(document)}
             onSelect={(id) => setActiveDocumentId(id)}
             onToggleSelect={toggleLibraryDocumentSelection}
@@ -1642,7 +1855,8 @@ function App() {
             pageImages={pageImages}
             pageMatches={pageMatches}
             readerBookmarks={activeReaderBookmarks}
-            zoom={zoom}
+            zoom={displayZoom}
+            onFitZoomChange={setFittedZoom}
             searchTerm={searchTerm}
             hoverSource={hoverSource}
             readerRef={readerRef}
@@ -1668,7 +1882,7 @@ function App() {
             chatDraft={chatDraft}
             setChatDraft={setChatDraft}
             folders={state.folders}
-            onPickFile={() => fileInputRef.current?.click()}
+            onPickFile={() => void pickPdfFiles()}
             onLoadActiveDocument={(document) => void loadPdfBytes(document)}
             onShowToast={showToast}
             onPatchState={patchState}
@@ -1676,6 +1890,12 @@ function App() {
             onGoToPage={goToPage}
             onGoToOutlineRow={goToOutlineRow}
             onAddReaderBookmark={addReaderBookmark}
+            onOpenSelectedSentenceActions={() => {
+              const sourceId = selectedSentenceId ? sourceSentenceIdsForSelection(selectedSentenceId)[0] : null;
+              if (sourceId) {
+                openSentenceActions(sentencePageFromId(sourceId) || pageCursor, sourceId);
+              }
+            }}
             onGoToReaderBookmark={goToReaderBookmark}
             onDeleteReaderBookmark={deleteReaderBookmark}
             onSelectSentenceAndScroll={selectSentenceAndScroll}
@@ -1700,6 +1920,7 @@ function App() {
             onOpenLinkPreview={(target) => void openLinkPreview(target)}
             onOpenWordMeaningPopup={openWordMeaningPopup}
             onFocusTranslationSentence={focusTranslationSentence}
+            onNewChat={startNewPaperChat}
             onQueueTask={(type, payload) => void queueTask(type, payload)}
             onRunPendingBridgeWorkers={() => void runPendingBridgeWorkers()}
             onPollBridge={() => void pollBridge()}
@@ -1728,12 +1949,36 @@ function App() {
             settings={state.settings}
             agentStatuses={agentStatuses}
             runtime={isTauriRuntime() ? "Tauri desktop" : "Browser preview"}
+            onPickObsidianVault={async () => {
+              const vault = await obsidianPickVault();
+              if (!vault) return false;
+              const configured = await obsidianConfigure(vault, state.settings.obsidianFolder || "Paper Pilot", state.settings.obsidianEnabled === "true");
+              patchState((draft) => {
+                draft.settings.obsidianVaultPath = configured.vaultPath;
+                draft.settings.obsidianFolder = configured.folder;
+                draft.settings.obsidianEnabled = String(configured.enabled);
+              });
+              return true;
+            }}
+            onConfigureObsidian={async (vaultPath, folder, enabled) => {
+              const configured = await obsidianConfigure(vaultPath, folder, enabled);
+              patchState((draft) => {
+                draft.settings.obsidianVaultPath = configured.vaultPath;
+                draft.settings.obsidianFolder = configured.folder;
+                draft.settings.obsidianEnabled = String(configured.enabled);
+              });
+            }}
+            onSyncObsidian={obsidianSyncNow}
             onResetWorkspace={() => void resetWorkspace()}
             onChange={(key, value) => {
+              const documentKey = key === "autoTranslate" && activeDocument
+                ? documentAutoTranslateSettingKey(activeDocument.id)
+                : null;
               patchState((draft) => {
                 draft.settings[key] = value;
+                if (documentKey) draft.settings[documentKey] = value;
               });
-              void setSetting(key, value);
+              void setSettings(documentKey ? [[key, value], [documentKey, value]] : [[key, value]]);
             }}
           />
         )}
@@ -1780,6 +2025,12 @@ function App() {
           loading={wordLookupLoadingKey === normalizeWordKey(wordPopup.word)}
           onClose={() => setWordPopup(null)}
           onAdjust={() => void queueAdjustedWordMeaning(wordPopup)}
+          onOpenSentenceActions={() => {
+            if (wordPopup.sourceSentenceId) {
+              openSentenceActions(wordPopup.page, wordPopup.sourceSentenceId);
+              setWordPopup(null);
+            }
+          }}
           onDeleteEntry={(entryId) => void deleteWordMeaningEntry(wordPopup.word, entryId)}
         />
       )}

@@ -76,7 +76,7 @@ const emptyState: AppStateRecord = {
     theme: "light",
     fontScale: "1",
     mathDelimiter: "$$",
-    autoTranslate: "true",
+    autoTranslate: "false",
     autoTranslateAutostartMigrated: "true",
     autoHighlight: "false",
     aiProvider: "codex-cli",
@@ -159,7 +159,7 @@ export async function getAgentProviderStatus(provider: string): Promise<AgentPro
 export async function importPdf(name: string, bytes: Uint8Array): Promise<DocumentRecord> {
   const invoke = await getInvoke();
   if (invoke) {
-    return invoke<DocumentRecord>("import_pdf", { name, bytes: Array.from(bytes) });
+    throw new Error("데스크톱 앱에서는 원본 PDF 파일을 선택해 주세요.");
   }
   const state = loadBrowserState();
   const id = crypto.randomUUID();
@@ -184,6 +184,26 @@ export async function importPdf(name: string, bytes: Uint8Array): Promise<Docume
   return document;
 }
 
+export async function takeOpenedPdfs(): Promise<DocumentRecord[]> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<DocumentRecord[]>("take_opened_pdfs") : [];
+}
+
+export async function pickPdfs(): Promise<DocumentRecord[]> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<DocumentRecord[]>("pick_pdfs") : [];
+}
+
+export async function importPdfPaths(paths: string[]): Promise<DocumentRecord[]> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<DocumentRecord[]>("import_pdf_paths", { paths }) : [];
+}
+
+export async function loadLibrary(): Promise<Pick<AppStateRecord, "folders" | "documents">> {
+  const invoke = await getInvoke();
+  return invoke ? invoke("load_library") : loadBrowserState();
+}
+
 export async function readDocumentBytes(documentId: string): Promise<Uint8Array> {
   const invoke = await getInvoke();
   if (invoke) {
@@ -191,6 +211,11 @@ export async function readDocumentBytes(documentId: string): Promise<Uint8Array>
   }
   const raw = sessionStorage.getItem(`paperdock-pdf-${documentId}`);
   return Uint8Array.from(raw ? JSON.parse(raw) : []);
+}
+
+export async function relinkPdf(documentId: string): Promise<DocumentRecord | null> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<DocumentRecord | null>("relink_pdf", { documentId }) : null;
 }
 
 export async function updateDocument(document: DocumentRecord): Promise<DocumentRecord> {
@@ -349,6 +374,51 @@ export async function deleteNote(id: string): Promise<void> {
   saveBrowserState(state);
 }
 
+export type ObsidianStatus = {
+  state: "off" | "none" | "pending" | "synced" | "attention" | "conflict" | "disconnected";
+  error: string;
+  relativePath: string | null;
+};
+
+export type ObsidianConfig = { vaultPath: string; folder: string; enabled: boolean };
+
+export async function obsidianStatus(documentId: string): Promise<ObsidianStatus> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<ObsidianStatus>("obsidian_status", { documentId }) : { state: "off", error: "", relativePath: null };
+}
+
+export async function obsidianPickVault(): Promise<string | null> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<string | null>("obsidian_pick_vault") : null;
+}
+
+export async function obsidianConfigure(vaultPath: string, folder: string, enabled: boolean): Promise<ObsidianConfig> {
+  const invoke = await getInvoke();
+  if (!invoke) throw new Error("Obsidian 연동은 데스크톱 앱에서 사용할 수 있습니다.");
+  return invoke<ObsidianConfig>("obsidian_configure", { vaultPath, folder, enabled });
+}
+
+export async function obsidianSyncNow(): Promise<number> {
+  const invoke = await getInvoke();
+  if (!invoke) return 0;
+  return invoke<number>("obsidian_sync_now");
+}
+
+export async function obsidianResolve(documentId: string, action: "disconnect" | "recreate" | "overwrite"): Promise<void> {
+  const invoke = await getInvoke();
+  if (invoke) await invoke("obsidian_resolve", { documentId, action });
+}
+
+export async function obsidianReconnect(documentId: string): Promise<boolean> {
+  const invoke = await getInvoke();
+  return invoke ? invoke<boolean>("obsidian_reconnect", { documentId }) : false;
+}
+
+export async function obsidianOpen(documentId: string): Promise<void> {
+  const invoke = await getInvoke();
+  if (invoke) await invoke("obsidian_open", { documentId });
+}
+
 export async function upsertCitationCard(citation: CitationCardRecord): Promise<CitationCardRecord> {
   const invoke = await getInvoke();
   if (invoke) {
@@ -423,6 +493,18 @@ export async function setSetting(key: string, value: string): Promise<void> {
   }
   const state = loadBrowserState();
   state.settings[key] = value;
+  saveBrowserState(state);
+}
+
+export async function setSettings(entries: Array<[string, string]>): Promise<void> {
+  if (entries.length === 0) return;
+  const invoke = await getInvoke();
+  if (invoke) {
+    await invoke("set_settings", { entries });
+    return;
+  }
+  const state = loadBrowserState();
+  for (const [key, value] of entries) state.settings[key] = value;
   saveBrowserState(state);
 }
 

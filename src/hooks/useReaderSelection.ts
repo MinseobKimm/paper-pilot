@@ -4,6 +4,7 @@ import { makeId, nowIso } from "../lib/ids";
 import { canvasToCompressedImageDataUrl, cleanSelection, compactUiText } from "../lib/fileActions";
 import { createAutoHighlights, highlightColors } from "../lib/highlights";
 import { selectionFromTextLayer, type DocumentTextLayoutMode, type SelectionToolbar, type TextSelectionGesture } from "../lib/pdfText";
+import { sentenceUnitsForPage } from "../lib/translations";
 import { explanationColor, explanationTag } from "../lib/annotationHelpers";
 import { upsertAnnotation, upsertComment } from "../lib/tauri";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
@@ -63,6 +64,39 @@ export function useReaderSelection(input: ReaderSelectionInput) {
   function textLayoutModeForPage(page: HTMLElement | null): DocumentTextLayoutMode | "auto" {
     const pageLayout = page?.dataset.textLayout;
     return pageLayout === "single" || pageLayout === "two-column" ? pageLayout : "auto";
+  }
+
+  function openSentenceActions(pageNumber: number, sentenceId: string) {
+    const page = document.getElementById(`page-${pageNumber}`);
+    const sentence = sentenceUnitsForPage(activePages.find((item) => item.pageNumber === pageNumber))
+      .find((item) => item.id === sentenceId);
+    if (!page || !sentence) return;
+    const pageBounds = page.getBoundingClientRect();
+    const spans = Array.from(page.querySelectorAll<HTMLElement>(".text-layer [data-sentence-id]"))
+      .filter((span) => span.dataset.sentenceId === sentenceId);
+    const bounds = spans.map((span) => span.getBoundingClientRect()).filter((rect) => rect.width > 1 && rect.height > 1);
+    if (bounds.length === 0) return;
+    const left = Math.min(...bounds.map((rect) => rect.left));
+    const top = Math.min(...bounds.map((rect) => rect.top));
+    const right = Math.max(...bounds.map((rect) => rect.right));
+    const bottom = Math.max(...bounds.map((rect) => rect.bottom));
+    const toolbar: SelectionToolbar = {
+      text: sentence.source,
+      page: pageNumber,
+      x: left,
+      y: Math.max(72, top - 46),
+      viewportRect: { left, top, right, bottom, width: right - left, height: bottom - top },
+      rects: bounds.map((rect) => ({
+        x: Math.max(0, rect.left - pageBounds.left),
+        y: Math.max(0, rect.top - pageBounds.top),
+        width: rect.width,
+        height: rect.height,
+        basisWidth: pageBounds.width,
+        basisHeight: pageBounds.height,
+      })),
+    };
+    setSelectionToolbar(toolbar);
+    setTextSelectionPreview({ page: pageNumber, rects: toolbar.rects });
   }
 
   function handleReaderMouseUp(event?: ReactMouseEvent) {
@@ -485,5 +519,6 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     createManualHighlight,
     addCommentFromSelection,
     explainSelection,
+    openSentenceActions,
   };
 }
