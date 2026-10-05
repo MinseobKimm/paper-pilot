@@ -11,7 +11,7 @@ const temporary = await mkdtemp(path.join(tmpdir(), "paper-pilot-layout-"));
 try {
   const compiled = path.join(temporary, "layout.mjs");
   await build({
-    stdin: { contents: 'export * from "./src/lib/pdfText.ts"; export * from "./src/lib/translations.ts";', resolveDir: process.cwd() },
+    stdin: { contents: 'export * from "./src/lib/pdfText.ts"; export * from "./src/lib/translations.ts"; export * from "./src/lib/textSelectionOffsets.ts";', resolveDir: process.cwd() },
     bundle: true, platform: "node", format: "esm", outfile: compiled,
     plugins: [{ name: "native-pdfjs", setup(builder) {
       builder.onResolve({ filter: /^(pdfjs-dist|sbd|react)/ }, (args) => ({ path: require.resolve(args.path), external: true }));
@@ -60,6 +60,33 @@ try {
     assert.equal(selected.length, 4, "forward and backward drags select four lines");
     assert.ok(selected.every(({ span }) => span.textContent.startsWith("Left")), "a drag within a column must not include its neighbor");
   }
+  const domRect = (left, top, width, height = 12) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const makeSpan = (text, x, y, widths = Array(text.length).fill(10), flowId = "0") => {
+    const boundaries = [x];
+    for (const width of widths) boundaries.push(boundaries.at(-1) + width);
+    return { dataset: { text, flowId }, textContent: text, firstChild: {},
+      getBoundingClientRect: () => domRect(x, y, boundaries.at(-1) - x),
+      ownerDocument: { createRange() { let start = 0, end = 0; return {
+        setStart(_node, offset) { start = offset; }, setEnd(_node, offset) { end = offset; },
+        getBoundingClientRect() { return domRect(boundaries[start], y, boundaries[end] - boundaries[start]); },
+      }; } },
+    };
+  };
+  const proportional = makeSpan("WiWi", 20, 10, [20, 4, 20, 4]);
+  assert.equal(lib.textOffsetAtX(proportional, 42), 1, "caret must follow proportional glyph widths");
+  assert.equal(lib.textOffsetAtX(proportional, 45), 2);
+  const dragSpans = [makeSpan("abcdefghij", 20, 20), makeSpan("klmnopqrst", 20, 40), makeSpan("NEIGHBOR", 250, 20, undefined, "1")];
+  const selectionPage = { dataset: { page: "1" }, getBoundingClientRect: () => domRect(0, 0, 500, 700), querySelectorAll: () => dragSpans };
+  const select = (startX, startY, endX, endY) => lib.selectionFromTextLayer(selectionPage, null, [], { pageElement: selectionPage, startX, startY, endX, endY }, "two-column");
+  assert.equal(select(40, 25, 80, 25).text, "cdef", "same-line drag must select only the cursor range");
+  assert.equal(select(80, 25, 40, 25).text, "cdef", "backward drag must preserve character boundaries");
+  const multiLine = select(70, 25, 50, 45);
+  assert.equal(multiLine.text, "fghij klm", "multi-line selection must trim both endpoint lines");
+  assert.equal(multiLine.rects[0].x, 70);
+  assert.equal(multiLine.rects[0].width, 50);
+  assert.equal(multiLine.rects[1].width, 30);
+  assert.equal(select(50, 45, 70, 25).text, multiLine.text);
+  assert.equal(select(40, 25, 50, 25).text, "c", "one-character selection must remain available");
   const page = { documentId: "test", pageNumber: 1, text: "Left paragraph. Right paragraph.", outlineLabel: "" };
   const result = { documentId: "test", taskType: "translatePage", status: "complete", inputText: "[translation: Korean; page 1]\nLeft Right paragraph. paragraph.", outputText: "" };
   assert.equal(lib.translationResultsForPage([result], page, "Korean").length, 0, "do not reuse translation after layout correction");

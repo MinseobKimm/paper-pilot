@@ -111,7 +111,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     textSelectionGestureRef.current = null;
     setTextSelectionPreview(null);
     const nativeText = selection ? cleanSelection(selection.toString()) : "";
-    const hasNativeSelection = Boolean(selection && selection.rangeCount > 0 && nativeText.length >= 2);
+    const hasNativeSelection = Boolean(selection && selection.rangeCount > 0 && nativeText.length >= 1);
     const hasDraggedText =
       Boolean(activeGesture) &&
       Math.hypot((activeGesture?.endX ?? 0) - (activeGesture?.startX ?? 0), (activeGesture?.endY ?? 0) - (activeGesture?.startY ?? 0)) >= 5;
@@ -162,7 +162,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
     const rect = range?.getBoundingClientRect();
     const toolbar =
       textLayerSelection ??
-      (rect && nativeText.length >= 2
+      (rect && nativeText.length >= 1
         ? ({
             text: nativeText,
             page: Number(page.dataset.page ?? "1"),
@@ -179,7 +179,7 @@ export function useReaderSelection(input: ReaderSelectionInput) {
             rects: fallbackRects,
           } satisfies SelectionToolbar)
         : null);
-    if (!toolbar || cleanSelection(toolbar.text).length < 2 || toolbar.rects.length === 0) {
+    if (!toolbar || cleanSelection(toolbar.text).length < 1 || toolbar.rects.length === 0) {
       setSelectionToolbar(null);
       selection?.removeAllRanges();
       return;

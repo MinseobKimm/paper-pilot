@@ -1,4 +1,5 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { sliceTextSpan, textOffsetAtX } from "./textSelectionOffsets";
 import { readingOrderForLines } from "./pdfReadingOrder";
 export const pdfTextExtractionVersion = "regional-layout-v3";
 export const pdfTextExtractionVersionKey = (documentId: string) => `pdfTextExtractionVersion:${documentId}`;
@@ -702,7 +703,7 @@ export function selectedSpansFromGesture(
     return [];
   }
   if (!columnInfo) {
-    return spanRangeWithinVisualLines(items, start, end, { gesture, fullLinesForVerticalDrag: true });
+    return spanRangeWithinVisualLines(items, start, end, { gesture, fullLinesForVerticalDrag: false });
   }
   if (startColumn === endColumn) {
     const columnItems = items
@@ -731,10 +732,10 @@ export function selectedSpansFromGesture(
   return selected.map(({ span, order, rect }) => ({ span, order, rect }));
 }
 
-export function joinSelectedSpanTexts(spans: HTMLElement[]) {
+export function joinSelectedSpanTexts(spans: HTMLElement[], texts?: string[]) {
   let output = "";
-  for (const span of spans) {
-    const raw = (span.dataset.text ?? "").trim();
+  for (const [index, span] of spans.entries()) {
+    const raw = (texts?.[index] ?? span.dataset.text ?? "").trim();
     if (!raw) {
       continue;
     }
@@ -797,7 +798,7 @@ export function selectionFromTextLayer(
   const anchorColumn = columnInfo && anchorSpan ? columnInfo.columnFor(anchorSpan.getBoundingClientRect()) : null;
   const lockedColumn = columnInfo && anchorColumn !== null ? anchorColumn : null;
   const gestureSpans = gesture && gesture.pageElement === page ? selectedSpansFromGesture(page, spans, gesture, layoutMode) : [];
-  const selectedSpans = (gestureSpans.length
+  let selectedSpans = (gestureSpans.length
     ? gestureSpans
     : spans
         .map((span, order) => ({ span, order, rect: span.getBoundingClientRect() }))
@@ -818,8 +819,29 @@ export function selectionFromTextLayer(
   if (selectedSpans.length === 0) {
     return null;
   }
-  const text = joinSelectedSpanTexts(selectedSpans.map((item) => item.span));
-  if (text.length < 2) {
+  let selectedTexts: string[] | undefined;
+  if (gesture && gestureSpans.length) {
+    const candidates = selectedSpans.map((item) => ({ ...item, column: 0, fullWidth: false }));
+    const anchor = closestSpanToPoint(candidates, gesture.startX, gesture.startY);
+    const focus = closestSpanToPoint(candidates, gesture.endX, gesture.endY);
+    if (!anchor || !focus) return null;
+    const anchorOffset = textOffsetAtX(anchor.span, gesture.startX);
+    const focusOffset = textOffsetAtX(focus.span, gesture.endX);
+    const forward = anchor.order < focus.order || (anchor.order === focus.order && anchorOffset <= focusOffset);
+    const first = forward ? anchor : focus;
+    const last = forward ? focus : anchor;
+    const firstOffset = forward ? anchorOffset : focusOffset;
+    const lastOffset = forward ? focusOffset : anchorOffset;
+    const slices = selectedSpans.flatMap((item) => {
+      const length = (item.span.textContent || item.span.dataset.text || "").length;
+      const part = sliceTextSpan(item.span, item.order === first.order ? firstOffset : 0, item.order === last.order ? lastOffset : length);
+      return part ? [{ ...item, rect: part.rect, text: part.text }] : [];
+    });
+    selectedSpans = slices;
+    selectedTexts = slices.map((item) => item.text);
+  }
+  const text = joinSelectedSpanTexts(selectedSpans.map((item) => item.span), selectedTexts);
+  if (text.length < 1) {
     return null;
   }
   const rects = mergeSelectionRects(
