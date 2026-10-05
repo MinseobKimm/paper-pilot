@@ -589,7 +589,8 @@ export function PdfPageView(props: PdfPageViewProps) {
                 page: props.pageNumber,
                 sourceSentenceId: sentenceId,
                 context: sentence?.source || raw,
-                x: side === "left" ? rect.left - 12 : rect.right + 12,
+                // Place left-column definitions over the opposite column instead of outside the page.
+                x: side === "left" && shellRect ? shellRect.left + shellRect.width / 2 + 12 : rect.right + 12,
                 y: rect.top + rect.height / 2,
                 side,
               });

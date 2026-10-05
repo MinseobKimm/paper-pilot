@@ -1,10 +1,10 @@
-import type { CSSProperties, PointerEvent } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { BookOpen, Bookmark, ChevronLeft, Eraser, Grid2X2, Highlighter, Languages, List, Maximize2, MoreVertical, Sparkles, X } from "./icons";
 import { InlineMathText, OutlineTitleText } from "./FormattedAiText";
 import type { DocumentRecord, PageRecord } from "../types";
 import type { OutlineRow } from "../lib/outlines";
 import { highlightColors } from "../lib/highlights";
-import { clampNumber } from "../lib/readerSettings";
+import { wordPopupPosition } from "../lib/wordPopupPosition";
 import { useUiStrings, type UiStrings } from "../lib/uiStrings";
 import type { WordMeaningEntry, WordPopup } from "../lib/wordMeanings";
 
@@ -208,15 +208,29 @@ export function WordMeaningPopup(props: {
   onOpenSentenceActions: () => void;
   onDeleteEntry: (entryId: string) => void;
 }) {
-  const top = clampNumber(props.popup.y, 72, Math.max(120, window.innerHeight - 220));
-  const left =
-    props.popup.side === "left"
-      ? clampNumber(props.popup.x, 260, Math.max(280, window.innerWidth - 12))
-      : clampNumber(props.popup.x, 12, Math.max(280, window.innerWidth - 280));
+  const popoverRef = useRef<HTMLElement | null>(null);
+  const [position, setPosition] = useState(() => wordPopupPosition(props.popup.x, props.popup.y, 320, 220, window.innerWidth, window.innerHeight));
+  useLayoutEffect(() => {
+    const popover = popoverRef.current;
+    if (!popover) return;
+    const updatePosition = () => {
+      const rect = popover.getBoundingClientRect();
+      setPosition(wordPopupPosition(props.popup.x, props.popup.y, rect.width, rect.height, window.innerWidth, window.innerHeight));
+    };
+    updatePosition();
+    const observer = new ResizeObserver(updatePosition);
+    observer.observe(popover);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [props.popup.x, props.popup.y]);
   return (
     <aside
-      className={`word-meaning-popover ${props.popup.side}`}
-      style={{ top, left }}
+      ref={popoverRef}
+      className="word-meaning-popover"
+      style={position}
       aria-label={props.ui.wordMeanings}
     >
       <div className="word-meaning-head">

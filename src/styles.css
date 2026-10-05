@@ -2047,14 +2047,6 @@ select:disabled {
   overflow: auto;
 }
 
-.word-meaning-popover.left {
-  transform: translate(-100%, -50%);
-}
-
-.word-meaning-popover.right {
-  transform: translate(0, -50%);
-}
-
 .word-meaning-head {
   display: flex;
   align-items: flex-start;
@@ -2185,15 +2177,6 @@ select:disabled {
 }
 
 @media (max-width: 760px) {
-  .word-meaning-popover.left,
-  .word-meaning-popover.right {
-    left: 12px !important;
-    right: 12px;
-    top: 72px !important;
-    width: auto;
-    transform: none;
-  }
-
   .word-meaning-row {
     grid-template-columns: minmax(0, 1fr);
   }
