@@ -279,7 +279,8 @@ export function InlineMathText(props: { text: string; inlineOnly?: boolean; onPa
 
 type FormattedAiBlock =
   | { kind: "math"; value: string }
-  | { kind: "text"; value: string };
+  | { kind: "text"; value: string }
+  | { kind: "table"; headers: string[]; alignments: Array<"left" | "center" | "right">; rows: string[][] };
 
 function readDelimitedMathBlock(lines: string[], startIndex: number, startToken: string, endToken: string) {
   const firstLine = normalizeMathDelimiters(lines[startIndex].trim());
@@ -327,6 +328,66 @@ function readEnvironmentMathBlock(lines: string[], startIndex: number) {
   return { value: firstLine, nextIndex: startIndex + 1, unclosed: true };
 }
 
+function tableCells(line: string): string[] | null {
+  const cells: string[] = [];
+  let cell = "";
+  let codeDelimiter = 0;
+  let mathDelimiter = 0;
+  let escapedMathEnd = "";
+  let separators = 0;
+  const text = line.trim();
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\" && index + 1 < text.length) {
+      const next = text[++index];
+      if (!codeDelimiter && (next === "(" || next === "[")) escapedMathEnd = next === "(" ? ")" : "]";
+      else if (next === escapedMathEnd) escapedMathEnd = "";
+      cell += next === "|" && !codeDelimiter && !mathDelimiter && !escapedMathEnd ? next : `\\${next}`;
+      continue;
+    }
+    if (char === "`" || (char === "$" && !codeDelimiter)) {
+      let length = 1;
+      while (text[index + length] === char) length += 1;
+      if (char === "`") codeDelimiter = codeDelimiter === length ? 0 : codeDelimiter || length;
+      else mathDelimiter = mathDelimiter === length ? 0 : mathDelimiter || length;
+      cell += char.repeat(length);
+      index += length - 1;
+      continue;
+    }
+    if (char === "|" && !codeDelimiter && !mathDelimiter && !escapedMathEnd) {
+      cells.push(cell.trim());
+      cell = "";
+      separators += 1;
+    } else cell += char;
+  }
+  if (!separators) return null;
+  cells.push(cell.trim());
+  if (text.startsWith("|") && cells[0] === "") cells.shift();
+  if (text.endsWith("|") && cells[cells.length - 1] === "") cells.pop();
+  return cells.length ? cells : null;
+}
+
+function readTableBlock(lines: string[], start: number) {
+  const headers = tableCells(lines[start]);
+  if (!headers) return null;
+  let separatorIndex = start + 1;
+  while (separatorIndex < lines.length && !lines[separatorIndex].trim()) separatorIndex += 1;
+  const separators = tableCells(lines[separatorIndex] || "");
+  if (!separators || separators.length !== headers.length || !separators.every((cell) => /^:?-{3,}:?$/.test(cell))) return null;
+  const alignments = separators.map((cell): "left" | "center" | "right" => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left");
+  const rows: string[][] = [];
+  let nextIndex = separatorIndex + 1;
+  while (nextIndex < lines.length) {
+    let rowIndex = nextIndex;
+    while (rowIndex < lines.length && !lines[rowIndex].trim()) rowIndex += 1;
+    const row = tableCells(lines[rowIndex] || "");
+    if (!row) break;
+    rows.push(headers.map((_, column) => row[column] || ""));
+    nextIndex = rowIndex + 1;
+  }
+  return { block: { kind: "table" as const, headers, alignments, rows }, nextIndex };
+}
+
 function formattedAiBlocks(value: string): FormattedAiBlock[] {
   const lines = value.replace(/\r/g, "").split("\n");
   const blocks: FormattedAiBlock[] = [];
@@ -356,6 +417,12 @@ function formattedAiBlocks(value: string): FormattedAiBlock[] {
         index = block.nextIndex;
         continue;
       }
+    }
+    const table = readTableBlock(lines, index);
+    if (table) {
+      blocks.push(table.block);
+      index = table.nextIndex;
+      continue;
     }
     blocks.push({ kind: "text", value: line });
     index += 1;
@@ -411,7 +478,6 @@ function FormattedAiLine(props: { line: string; index: number; onPageCitation?: 
 
 export function FormattedAiText(props: { text: string; compact?: boolean; onPageCitation?: (page: number) => void }) {
   const blocks = formattedAiBlocks(props.text);
-  const lines: string[] = [];
   if (blocks.length === 0) {
     return null;
   }
@@ -420,55 +486,27 @@ export function FormattedAiText(props: { text: string; compact?: boolean; onPage
       {blocks.map((block, index) =>
         block.kind === "math" ? (
           <MathChunk key={`math-${index}-${block.value}`} value={block.value} display />
+        ) : block.kind === "table" ? (
+          <div className="ai-table-scroll" key={`table-${index}`} role="region" aria-label="Table" tabIndex={0}>
+            <table className="ai-table">
+              <thead><tr>{block.headers.map((cell, column) => (
+                <th key={column} scope="col" style={{ textAlign: block.alignments[column] }}>
+                  <InlineMathText text={cell} inlineOnly onPageCitation={props.onPageCitation} />
+                </th>
+              ))}</tr></thead>
+              <tbody>{block.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>{row.map((cell, column) => (
+                  <td key={column} style={{ textAlign: block.alignments[column] }}>
+                    <InlineMathText text={cell} inlineOnly onPageCitation={props.onPageCitation} />
+                  </td>
+                ))}</tr>
+              ))}</tbody>
+            </table>
+          </div>
         ) : (
           <FormattedAiLine key={`text-${index}-${block.value}`} line={block.value} index={index} onPageCitation={props.onPageCitation} />
         ),
       )}
-      {lines.map((line, index) => {
-        const normalizedLine = normalizeMathDelimiters(line);
-        const displayMath =
-          normalizedLine.match(/^\$\$([\s\S]+)\$\$$/) ??
-          normalizedLine.match(/^\\\[([\s\S]+)\\\]$/) ??
-          normalizedLine.match(/^\\begin\{(?:equation|align|gather)\*?\}([\s\S]+)\\end\{(?:equation|align|gather)\*?\}$/);
-        if (displayMath) {
-          return <MathChunk key={`${line}-${index}`} value={displayMath[1]} display />;
-        }
-        const heading = normalizedLine.match(/^#{1,4}\s+(.+)/) ?? normalizedLine.match(/^\*\*(.+)\*\*:?$/);
-        if (heading) {
-          return (
-            <h4 key={`${line}-${index}`}>
-              <InlineMathText text={heading[1]} />
-            </h4>
-          );
-        }
-        const numbered = normalizedLine.match(/^(\d+)[.)]\s+(.+)/);
-        if (numbered) {
-          return (
-            <div key={`${line}-${index}`} className="numbered-line">
-              <b>{numbered[1]}.</b>
-              <span>
-                <InlineMathText text={numbered[2]} />
-              </span>
-            </div>
-          );
-        }
-        const bullet = normalizedLine.match(/^[-*]\s+(.+)/);
-        if (bullet) {
-          return (
-            <div key={`${line}-${index}`} className="bullet-line">
-              <i />
-              <span>
-                <InlineMathText text={bullet[1]} />
-              </span>
-            </div>
-          );
-        }
-        return (
-          <p key={`${line}-${index}`}>
-            <InlineMathText text={normalizedLine} />
-          </p>
-        );
-      })}
     </div>
   );
 }
