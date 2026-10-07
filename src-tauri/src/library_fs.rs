@@ -155,6 +155,29 @@ pub fn register_linked_pdf(
     Ok(document)
 }
 
+// Downloads do not constitute an explicit relocation of an existing original.
+// Check and register in one write transaction, including imports racing in
+// another window while the download was in progress.
+pub fn register_downloaded_pdf(
+    conn: &mut Connection,
+    path: &Path,
+    hash: &str,
+    documents_dir: &Path,
+) -> AppResult<(DocumentRecord, bool)> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let select = "SELECT id,title,file_name,file_path,hash,page_count,authors,year,abstract_text,folder_id,bookmarked,created_at,updated_at,source_path FROM documents";
+    let existing = tx.query_row(&format!("{select} WHERE hash=?1 LIMIT 1"), [hash], row_document)
+        .optional().map_err(|error| error.to_string())?;
+    if let Some(document) = existing { return Ok((document, false)); }
+    let path_used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM documents WHERE source_path=?1 OR file_path=?1)", [path.to_string_lossy().as_ref()], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if path_used { return Err("이 저장 경로는 기존 논문에 연결되어 있습니다. 다른 이름을 사용해 주세요.".into()); }
+    let document = register_linked_pdf(&tx, path, hash, documents_dir)?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok((document, true))
+}
+
 pub fn migrate_stored_sources(conn: &Connection, documents_dir: &Path) -> AppResult<()> {
     let mut stmt = conn.prepare(
         "SELECT id, title, file_name, file_path, hash, page_count, authors, year, abstract_text, folder_id, bookmarked, created_at, updated_at, source_path

@@ -1,3 +1,4 @@
+import { OnlinePaperPanel } from "../../ScholarlyPanels";
 import { Download, FileArchive, ListTree, Search } from "../../icons";
 import { OutlineTitleText } from "../../FormattedAiText";
 import { folderDisplayName, folderTreeRows } from "../../../lib/libraryTree";
@@ -24,6 +25,7 @@ export function InfoPanel(props: {
   }));
   return (
     <div className="panel-stack">
+      <OnlinePaperPanel key={props.document.id} document={props.document} />
       <label className="field">
         <span>{ui.title}</span>
         <input value={props.document.title} onChange={(event) => props.onMetadata("title", event.target.value)} />

@@ -14,7 +14,7 @@ export type AiDisplaySection = {
 };
 
 export const wordMeaningTaskType: AiTaskType = "defineWordMeanings";
-export const rightPanelHiddenTasks = new Set(["translatePage", wordMeaningTaskType, "classifyDocumentLayout"]);
+export const rightPanelHiddenTasks = new Set(["translatePage", wordMeaningTaskType, "classifyDocumentLayout", "indexPaperCitations"]);
 const chatAskPrefixPattern = /^\[(PDF direct|Fast Answer|Auto Answer|Deep Read|Deep)\]\s*/i;
 
 export type ChatAskModeKind = "plain" | "auto" | "fast" | "deep";
@@ -51,6 +51,7 @@ const taskLabelKeys: Record<string, string> = {
   citationReason: "citationReason",
   externalLinkSummary: "linkSummary",
   outlineDocument: "documentOutline",
+  indexPaperCitations: "citationCards",
   classifyDocumentLayout: "documentOutline",
   recommendPapers: "paperRecommendations",
   defineWordMeanings: "wordMeanings",

@@ -10,7 +10,7 @@ export type WordMeaningEntry = {
   documentTitle: string;
   context: string;
   createdAt: string;
-  source: "ai" | "dictionary" | "local";
+  source: "ai" | "dictionary" | "local" | "local-llm";
 };
 
 export type WordMeaningMap = Record<string, WordMeaningEntry[]>;
@@ -51,12 +51,29 @@ export type WordPopup = {
 };
 
 export const wordMeaningMapSettingKey = "wordMeaningMapJson";
+export const wordClickCountsSettingKey = "wordClickCountsJson";
 export const wordMeaningLookupEnabledSettingKey = "wordMeaningLookupEnabled";
 export const onlineDictionaryCacheSettingKey = "onlineDictionaryCacheJson";
 export const onlineDictionaryParserVersion = "ko-direct-v3";
 export const onlineDictionarySourceLabel = `Korean dictionary APIs ${onlineDictionaryParserVersion}`;
 export const wordMeaningBatchLimit = 120;
 export const onlineDictionaryBatchLimit = 180;
+
+export function wordClickCountsFromSettings(settings: Record<string, string>): Record<string, number> {
+  try {
+    const parsed = JSON.parse(settings[wordClickCountsSettingKey] || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const counts: Record<string, number> = {};
+    for (const [rawWord, rawCount] of Object.entries(parsed)) {
+      const word = normalizeWordKey(rawWord);
+      const count = Number(rawCount);
+      if (word && Number.isSafeInteger(count) && count >= 0) counts[word] = count;
+    }
+    return counts;
+  } catch {
+    return {};
+  }
+}
 
 const documentWordListSettingPrefix = "documentWordList:";
 
@@ -307,18 +324,15 @@ function addKoreanDictionaryMeaning(value: string, output: Set<string>, record?:
   }
 }
 
-function isCurrentDictionaryEntry(entry: WordMeaningEntry) {
-  return entry.source !== "dictionary" || entry.context === onlineDictionarySourceLabel;
+export function hasUsableWordMeaning(entries: WordMeaningEntry[] | undefined) {
+  return Boolean(entries?.some((entry) => displayWordMeaning(entry).length > 0));
 }
 
-export function hasUsableWordMeaning(entries: WordMeaningEntry[] | undefined) {
-  return Boolean(
-    entries?.some((entry) =>
-      entry.source === "dictionary"
-        ? isCurrentDictionaryEntry(entry) && Boolean(normalizeOnlineDictionaryMeaning(entry.meaning))
-        : Boolean(entry.meaning.trim()),
-    ),
-  );
+export function hasWordMeaningForContext(entries: WordMeaningEntry[] | undefined, documentId: string, sentence: string) {
+  const context = normalizeForMatch(sentence);
+  return Boolean(context && entries?.some((entry) =>
+    entry.documentId === documentId && normalizeForMatch(entry.context) === context && displayWordMeaning(entry).length > 0,
+  ));
 }
 
 export function displayWordMeaning(entry: WordMeaningEntry) {
@@ -327,7 +341,6 @@ export function displayWordMeaning(entry: WordMeaningEntry) {
 
 export function displayWordMeaningEntries(entries: WordMeaningEntry[]) {
   return entries
-    .filter(isCurrentDictionaryEntry)
     .map((entry) => ({ ...entry, meaning: displayWordMeaning(entry) }))
     .filter((entry) => entry.meaning.length > 0);
 }
@@ -507,56 +520,6 @@ function dictionaryLookupCandidates(term: string) {
   return [...candidates].filter(isMeaningfulEnglishWord);
 }
 
-async function fetchOnlineDictionaryMeaningForKey(key: string): Promise<string> {
-  const encoded = encodeURIComponent(key);
-  const endpoints = [
-    { url: `https://api.wiktapi.dev/v1/en/word/${encoded}/translations?lang=ko`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: true },
-    { url: `https://api.wiktapi.dev/v1/en/word/${encoded}/translations`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: true },
-    { url: `https://freedictionaryapi.com/api/v1/entries/en/${encoded}?translations=true`, parser: parseOnlineDictionaryMeaning, rootIsTranslations: false },
-    { url: `https://api.mymemory.translated.net/get?q=${encoded}&langpair=en%7Cko&mt=1`, parser: parseMachineTranslatedKoreanMeaning, rootIsTranslations: false },
-  ];
-  for (const endpoint of endpoints) {
-    try {
-      const response = await fetch(endpoint.url);
-      if (!response.ok) {
-        continue;
-      }
-      const payload = (await response.json()) as unknown;
-      const meaning = endpoint.parser(payload, endpoint.rootIsTranslations);
-      if (meaning) {
-        return meaning;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return "";
-}
-
-export async function fetchOnlineDictionaryMeaning(term: string): Promise<string> {
-  for (const candidate of dictionaryLookupCandidates(term)) {
-    const meaning = await fetchOnlineDictionaryMeaningForKey(candidate);
-    if (meaning) {
-      return meaning;
-    }
-  }
-  return "";
-}
-
-export async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = [];
-  let cursor = 0;
-  async function worker() {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await mapper(items[index]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
-
 function proseForTermExtraction(text: string) {
   return text
     .replace(/\$[\s\S]*?\$/g, " ")
@@ -656,6 +619,15 @@ function addTermCandidate(
   });
 }
 
+function sentenceAroundTerm(text: string, index: number) {
+  const before = text.slice(Math.max(0, index - 600), index);
+  const after = text.slice(index, Math.min(text.length, index + 600));
+  const start = Math.max(before.lastIndexOf("."), before.lastIndexOf("!"), before.lastIndexOf("?"));
+  const ends = [after.indexOf("."), after.indexOf("!"), after.indexOf("?")].filter((value) => value >= 0);
+  const end = ends.length ? Math.min(...ends) + 1 : after.length;
+  return `${before.slice(start + 1)}${after.slice(0, end)}`.replace(/\s+/g, " ").trim();
+}
+
 export function extractDocumentTermCandidates(pages: PageRecord[], document: DocumentRecord | null = null, limit = 5000): DocumentTermCandidate[] {
   const prose = proseForTermExtraction(pages.map((page) => page.text).join("\n\n"));
   const titleText = normalizeForMatch(`${document?.title ?? ""} ${document?.abstractText ?? ""}`);
@@ -679,7 +651,7 @@ export function extractDocumentTermCandidates(pages: PageRecord[], document: Doc
   }
   const candidates = new Map<string, { term: string; kind: "word" | "phrase"; count: number; first: number; examples: string[] }>();
   for (const [word, value] of counts.entries()) {
-    addTermCandidate(candidates, word, "word", value.first, "");
+    addTermCandidate(candidates, word, "word", value.first, sentenceAroundTerm(prose, value.first));
   }
   return [...candidates.values()]
     .map((candidate) => {
@@ -750,7 +722,7 @@ export function wordMeaningMapFromSettings(settings: Record<string, string>): Wo
             documentTitle: String(record.documentTitle ?? ""),
             context: String(record.context ?? ""),
             createdAt: String(record.createdAt ?? nowIso()),
-            source: record.source === "local" ? "local" : record.source === "dictionary" ? "dictionary" : "ai",
+            source: record.source === "local-llm" ? "local-llm" : record.source === "local" ? "local" : record.source === "dictionary" ? "dictionary" : "ai",
           };
         })
         .filter((entry): entry is WordMeaningEntry => entry !== null);

@@ -31,6 +31,7 @@ import type { ReaderMarkupTool } from "../../hooks/useReaderSelection";
 import { PdfPageView } from "./PdfPageView";
 import { TranslationSidecar } from "./TranslationSidecar";
 import { X } from "../icons";
+import type { PaperCitation } from "../../lib/paperCitations";
 
 type RegionDrag = {
   page: number;
@@ -52,6 +53,10 @@ type ReaderWorkspaceProps = {
   activeAnnotations: AnnotationRecord[];
   activeAiResults: AiResultRecord[];
   activeCitations: CitationCardRecord[];
+  paperCitations: PaperCitation[];
+  citationIndexStatus: string;
+  onRetryCitationIndex: () => void;
+  onCitationClick: (referenceId: string, label: string, x: number, y: number) => void;
   activeNote: NoteRecord | null;
   activeOutlineRows: OutlineRow[];
   activeOutlineId: string | null;
@@ -328,6 +333,11 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
         />
       )}
       <div className="pdf-stage-shell">
+        {props.activeDocument && (props.citationIndexStatus !== "ready" || props.paperCitations.some((reference) => reference.status === "pending")) &&
+          <div className="citation-index-status" role="status">
+            {props.citationIndexStatus === "failed" ? <><span>{props.ui.citationIndexFailed}</span><button onClick={props.onRetryCitationIndex}>{props.ui.retry}</button></> :
+              <span>{props.citationIndexStatus === "ready" ? `${props.ui.citations} · ${props.paperCitations.filter((reference) => reference.status !== "pending").length}/${props.paperCitations.length} arXiv` : props.ui.citationIndexPreparing}</span>}
+          </div>}
         <div
           ref={props.readerRef}
           className={[
@@ -410,6 +420,8 @@ export function ReaderWorkspace(props: ReaderWorkspaceProps) {
                   zoom={props.zoom}
                   searchTerm={props.searchTerm}
                   referencePages={props.activePages}
+                  paperCitations={props.paperCitations}
+                  onCitationClick={props.onCitationClick}
                   annotations={props.activeAnnotations.filter((annotation) => annotation.page === pageNumber)}
                   hoverSource={props.hoverSource}
                   sentenceUnits={sentenceUnitsForPage(props.activePages.find((page) => page.pageNumber === pageNumber))}

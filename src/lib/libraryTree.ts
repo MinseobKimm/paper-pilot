@@ -9,6 +9,10 @@ export type FolderTreeRow = {
   childCount: number;
 };
 
+export function folderExpandedSettingKey(folderId: string) {
+  return `libraryFolderExpanded:${folderId}`;
+}
+
 export function documentFolderId(document: DocumentRecord) {
   return document.folderId || "root";
 }

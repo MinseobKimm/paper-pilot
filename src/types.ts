@@ -1,5 +1,5 @@
 export type PanelTab = "ai" | "activity" | "citations" | "notes" | "info";
-export type WorkspaceMode = "library" | "reader" | "settings";
+export type WorkspaceMode = "library" | "reader" | "settings" | "discover";
 export type AiProviderKind = "codex-cli" | "claude-code" | "local-draft";
 export type AgentProviderStatus = {
   provider: AiProviderKind | string;
@@ -19,6 +19,7 @@ export type AiTaskType =
   | "citationReason"
   | "externalLinkSummary"
   | "outlineDocument"
+  | "indexPaperCitations"
   | "classifyDocumentLayout"
   | "recommendPapers"
   | "defineWordMeanings";
@@ -216,6 +217,8 @@ export type ExportBundle = {
   notes: NoteRecord[];
   aiResults: AiResultRecord[];
   citationCards: CitationCardRecord[];
+  scholarlyProfile?: import("./types/scholarly").DocumentScholarlyProfile | null;
+  scholarlyScans?: Array<{ scanId: string; status: string; createdAt: string; itemStatus: string; candidates: import("./types/scholarly").PaperMatchCandidate[]; error: string }>;
   exportedAt: string;
 };
 

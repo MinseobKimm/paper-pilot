@@ -18,6 +18,7 @@ import { isExplanationAnnotation } from "../../lib/annotationHelpers";
 import { normalizeForMatch } from "../../lib/textUtils";
 import { annotateHyphenatedTextSpans, clickedWordFromTextSpan, type WordPopup } from "../../lib/wordMeanings";
 import { useUiStrings } from "../../lib/uiStrings";
+import { paperCitationTargets, type PaperCitation } from "../../lib/paperCitations";
 type PdfPageViewProps = {
   pdf: PdfDocumentProxy;
   documentId: string;
@@ -25,6 +26,8 @@ type PdfPageViewProps = {
   zoom: number;
   searchTerm: string;
   referencePages: PageRecord[];
+  paperCitations: PaperCitation[];
+  onCitationClick: (referenceId: string, label: string, x: number, y: number) => void;
   annotations: AnnotationRecord[];
   hoverSource: string | null;
   sentenceUnits: SentenceUnit[];
@@ -432,6 +435,7 @@ export function PdfPageView(props: PdfPageViewProps) {
     })
     .filter(Boolean) as Array<{ annotation: AnnotationRecord; top: number; left: number }>;
   const previewTargets = [...referenceTargets, ...linkTargets];
+  const citationTargets = paperCitationTargets(props.pageNumber, textLayerMetrics.text, textLayerMetrics.boxes, props.paperCitations);
   const pageLayoutClass = props.textLayoutMode === "single" ? "layout-single" : props.textLayoutMode === "two-column" ? "layout-two-column" : "layout-auto";
 
   return (
@@ -520,6 +524,14 @@ export function PdfPageView(props: PdfPageViewProps) {
         ))}
       </div>
       <div className="pdf-link-layer">
+        {citationTargets.map((target) => <button key={target.id} className="pdf-link-hit pdf-citation-hit"
+          aria-label={`${ui.citationCards}: ${target.text}`} title={target.text} style={target.rect}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            props.onCitationClick(target.referenceId, target.text, bounds.right + 12, bounds.top + bounds.height / 2);
+          }} />)}
         {previewTargets.map((target) => (
           <button
             key={target.id}

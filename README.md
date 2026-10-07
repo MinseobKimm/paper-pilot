@@ -92,6 +92,16 @@ Ask about a selected page region, figure, table, or equation. Paper Pilot sends 
 - Citation cards with reference extraction, link enrichment, rationale notes, and BibTeX/CSV export.
 - Study export as local JSON/ZIP bundles.
 
+## arXiv Discovery And Online Linking
+
+Open **arXiv** in the top bar or **Discover papers** in the library. Search keywords, `au:Author Name`, or an arXiv URL/ID (including an old ID or a specific version). The latest feed starts with the last seven days. Filters are remembered, and a search keeps the same reference time across pages until refreshed.
+
+**Import PDF** asks for a save location and opens the registered paper. Downloads support cancellation and retry, validate the temporary PDF, and preserve existing files and original paths when duplicates are found. A newer version is imported as a separate document.
+
+In **Document information → Online paper information**, review match candidates and choose which metadata fields to apply. Unlinking retains the applied metadata. **Scan library** collects candidates for unlinked documents without connecting them automatically; scan state and candidates survive a restart, and interrupted scans wait for manual resume. Connected papers offer related works, references, and citing works with provider and query times.
+
+PDF matching reads up to five pages locally. Only identifiers and search metadata are sent to arXiv/OpenAlex. Responses are cached for 24 hours, with an older cache available on network failure. OpenAlex supports limited anonymous queries; an optional key in Settings is stored in macOS Keychain. These integrations are available in the desktop app.
+
 ## Ask AI Paper Q&A
 
 Paper chat always gives the selected agent the original PDF path and a compact document context pack. The agent checks the paper directly and cites pages. Earlier assistant answers are corrected when they conflict with the original paper.
@@ -193,6 +203,7 @@ Local builds use an ad-hoc signature. Distributing the app to other Macs without
 ```bash
 npm test
 npm run desktop:test
+npm run test:scholarly
 python3 -m unittest discover -s retrieval-adapter -p 'test_*.py'
 ```
 

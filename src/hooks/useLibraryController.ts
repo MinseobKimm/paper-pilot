@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppStateRecord, DocumentRecord, FolderRecord, WorkspaceMode } from "../types";
 import { deleteDocumentScopedSettings } from "../lib/documentSettings";
-import { documentFolderId, folderDescendantIds, folderPathLabel } from "../lib/libraryTree";
+import { documentFolderId, folderDescendantIds, folderExpandedSettingKey, folderPathLabel } from "../lib/libraryTree";
 import { makeId, nowIso } from "../lib/ids";
-import { deleteDocument, deleteFolders, updateDocument, upsertFolder, loadLibrary, isTauriRuntime } from "../lib/tauri";
+import { deleteDocument, deleteFolders, updateDocument, upsertFolder, loadLibrary, isTauriRuntime, setSettings } from "../lib/tauri";
 import type { PdfDocumentProxy } from "../lib/pdfDocument";
 import type { OutlineAnchor, OutlineRow } from "../lib/outlines";
 import type { UiStrings } from "../lib/uiStrings";
@@ -32,6 +32,18 @@ export function useLibraryController(input: LibraryControllerInput) {
   const [folderFilter, setFolderFilter] = useState("root");
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const folderStateSaveRef = useRef(Promise.resolve());
+
+  function setFolderExpanded(folderId: string, expanded: boolean) {
+    const key = folderExpandedSettingKey(folderId);
+    const value = String(expanded);
+    input.patchState((draft) => {
+      draft.settings[key] = value;
+    });
+    folderStateSaveRef.current = folderStateSaveRef.current
+      .then(() => setSettings([[key, value]]))
+      .catch((error) => input.showToast(String(error), "error"));
+  }
 
   useEffect(() => {
     const existing = new Set(input.state.documents.map((document) => document.id));
@@ -232,6 +244,7 @@ export function useLibraryController(input: LibraryControllerInput) {
     setLibraryQuery,
     folderFilter,
     setFolderFilter,
+    setFolderExpanded,
     newFolderName,
     setNewFolderName,
     selectedDocumentIds,

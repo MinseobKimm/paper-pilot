@@ -202,7 +202,9 @@ export function WordMeaningPopup(props: {
   ui: UiStrings;
   popup: WordPopup;
   entries: WordMeaningEntry[];
+  clickCount: number;
   loading: boolean;
+  error: string | null;
   onClose: () => void;
   onAdjust: () => void;
   onOpenSentenceActions: () => void;
@@ -236,12 +238,14 @@ export function WordMeaningPopup(props: {
       <div className="word-meaning-head">
         <div>
           <strong>{props.popup.word}</strong>
+          <span>{props.ui.wordMeaningClickCount}: {props.clickCount}</span>
         </div>
         <button title={props.ui.dismissMessage} type="button" onClick={props.onClose}>
           <X size={14} />
         </button>
       </div>
       <div className="word-meaning-list">
+        {props.loading && props.entries.length > 0 && <div className="word-meaning-loading">{props.ui.wordMeaningLoading}</div>}
         {props.entries.length === 0 && props.loading && (
           <div className="word-meaning-empty">
             <span>{props.ui.wordMeaningLoading}</span>
@@ -249,7 +253,7 @@ export function WordMeaningPopup(props: {
         )}
         {props.entries.length === 0 && !props.loading && (
           <div className="word-meaning-empty">
-            <span>{props.ui.wordMeaningNone}</span>
+            <span>{props.error || props.ui.wordMeaningNone}</span>
           </div>
         )}
         {props.entries.map((entry) => (
@@ -272,7 +276,7 @@ export function WordMeaningPopup(props: {
             <span>{props.ui.sentenceActions}</span>
           </button>
         )}
-        <button type="button" onClick={props.onAdjust}>
+        <button type="button" onClick={props.onAdjust} disabled={props.loading}>
           <Sparkles size={14} />
           <span>{props.ui.adjustWordMeaning}</span>
         </button>

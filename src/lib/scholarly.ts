@@ -1,3 +1,4 @@
+import { scholarlyInvoke, scholarlyRequestId } from "./scholarlyService";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "./tauri";
 import type { CitationCardRecord, DocumentRecord } from "../types";
@@ -120,6 +121,7 @@ export async function searchOpenAlexWorks(query: string, perPage = 5): Promise<S
 }
 
 export async function resolveCitationLink(card: CitationCardRecord): Promise<CitationCardRecord> {
+  if (isTauriRuntime()) return scholarlyInvoke<CitationCardRecord>("scholarly_resolve_citation", { card, requestId: scholarlyRequestId() });
   const doi = cleanDoi(card.doi);
   let matches: ScholarlyPaperLink[] = [];
   if (doi) {
@@ -135,7 +137,7 @@ export async function resolveCitationLink(card: CitationCardRecord): Promise<Cit
     const query = [card.title, card.authors, card.year].filter(Boolean).join(" ") || card.rawReference;
     matches = await searchOpenAlexWorks(query, 1);
   }
-  const paper = matches[0];
+  const paper = doi ? matches.find((item) => cleanDoi(item.doi) === doi) : undefined;
   if (!paper) {
     return {
       ...card,

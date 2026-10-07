@@ -9,14 +9,17 @@
     "test": "npm run build",
     "test:tables": "node scripts/test-ai-tables.mjs",
     "test:chat": "node scripts/test-paper-chat.mjs",
+    "test:citations": "node scripts/test-paper-citations.mjs",
     "test:layout": "node scripts/test-pdf-layout.mjs",
+    "test:word-meanings": "node scripts/test-word-meanings.mjs",
     "setup:python": "node scripts/setup-python.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "build:mac": "tauri build --config src-tauri/tauri.macos.conf.json --bundles app && node scripts/sync-mac-app.mjs",
     "build:mac:dmg": "tauri build --config src-tauri/tauri.macos.conf.json --bundles dmg",
-    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:scholarly": "node scripts/test-scholarly.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

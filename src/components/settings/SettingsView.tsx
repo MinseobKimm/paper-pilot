@@ -1,3 +1,4 @@
+import { OpenAlexKeySettings } from "../ScholarlyPanels";
 import { Bot, Trash2 } from "../icons";
 import { useEffect, useState } from "react";
 import type { AgentProviderStatus, AiProviderKind } from "../../types";
@@ -46,6 +47,7 @@ export function SettingsView(props: {
           <p>{props.ui.settingsSubtitle}</p>
         </div>
       </div>
+      <OpenAlexKeySettings ko={ko} />
       <div className="settings-grid">
         <label className="field">
           <span>{props.ui.uiLanguage}</span>

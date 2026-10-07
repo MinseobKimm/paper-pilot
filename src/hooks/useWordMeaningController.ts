@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
-import type { AiResultRecord, AiTaskType, AppStateRecord, DocumentRecord, PageRecord } from "../types";
+import { useEffect, useRef, useState } from "react";
+import type { AiResultRecord, AppStateRecord, DocumentRecord, PageRecord } from "../types";
 import { makeId, nowIso } from "../lib/ids";
-import { selectedCodexReasoningEffort } from "../lib/aiPreferences";
 import { wordMeaningLookupEnabled } from "../lib/appState";
 import {
   pageTextLayoutConfidenceSettingKey,
@@ -9,41 +8,29 @@ import {
   pageTextLayoutSourceSettingKey,
   parsePageTextLayoutModes,
 } from "../lib/readerSettings";
-import { setSetting } from "../lib/tauri";
+import { generateLocalWordMeaning, setSetting } from "../lib/tauri";
 import { normalizeComparable } from "../lib/textUtils";
 import type { UiLanguage, UiStrings } from "../lib/uiStrings";
 import { wordMeaningTaskType } from "../lib/aiResults";
 import {
-  basicDictionaryMeaning,
   bestTermForWordPopup,
+  displayWordMeaning,
   documentWordListSettingKey,
   extractDocumentTermCandidates,
-  fetchOnlineDictionaryMeaning,
   hasUsableWordMeaning,
-  mapWithConcurrency,
-  normalizeOnlineDictionaryMeaning,
+  hasWordMeaningForContext,
   normalizeWordKey,
-  onlineDictionaryBatchLimit,
-  onlineDictionaryCacheFromSettings,
-  onlineDictionaryCacheSettingKey,
-  onlineDictionaryParserVersion,
-  onlineDictionarySourceLabel,
   parseWordMeaningItems,
   requestedWordMeaningTerms,
   wordMeaningBatchLimit,
-  wordMeaningMapFromSettings,
   wordMeaningMapSettingKey,
+  wordClickCountsFromSettings,
+  wordClickCountsSettingKey,
   type WordMeaningMap,
   type WordPopup,
 } from "../lib/wordMeanings";
 
 type PatchState = (mutator: (draft: AppStateRecord) => void) => void;
-
-type QueueTask = (
-  taskType: AiTaskType,
-  payload: Record<string, unknown>,
-  options?: { silent?: boolean; keepPanel?: boolean },
-) => Promise<AiResultRecord | null>;
 
 type WordMeaningControllerInput = {
   state: AppStateRecord;
@@ -56,7 +43,6 @@ type WordMeaningControllerInput = {
   uiLanguage: UiLanguage;
   patchState: PatchState;
   showToast: (message: string, kind?: "info" | "error") => void;
-  queueTask: QueueTask;
   ensureActivePages: () => Promise<PageRecord[]>;
 };
 
@@ -72,11 +58,17 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     uiLanguage,
     patchState,
     showToast,
-    queueTask,
     ensureActivePages,
   } = input;
   const [wordPopup, setWordPopup] = useState<WordPopup | null>(null);
   const [wordLookupLoadingKey, setWordLookupLoadingKey] = useState<string | null>(null);
+  const [wordLookupError, setWordLookupError] = useState<string | null>(null);
+  const meaningMapRef = useRef(wordMeaningMap);
+  const clickCountsRef = useRef(wordClickCountsFromSettings(state.settings));
+  const meaningSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const clickSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => { meaningMapRef.current = wordMeaningMap; }, [wordMeaningMap]);
+  useEffect(() => { clickCountsRef.current = wordClickCountsFromSettings(state.settings); }, [state.settings]);
   async function persistWordListForPages(documentId: string, pages: PageRecord[]) {
     const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
     const candidates = extractDocumentTermCandidates(pages, document);
@@ -111,7 +103,9 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
       return 0;
     }
     const document = state.documents.find((item) => item.id === result.documentId) ?? activeDocument;
-    const nextMap = wordMeaningMapFromSettings(state.settings);
+    const nextMap = Object.fromEntries(
+      Object.entries(meaningMapRef.current).map(([key, entries]) => [key, [...entries]]),
+    ) as WordMeaningMap;
     let added = 0;
     for (const item of meanings) {
       const key = normalizeWordKey(item.word);
@@ -122,9 +116,7 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
       const entries = nextMap[key] ?? [];
       const duplicate = entries.some(
         (entry) =>
-          entry.documentId === result.documentId &&
-          normalizeComparable(entry.meaning) === normalizeComparable(meaning) &&
-          normalizeComparable(entry.context) === normalizeComparable(item.context),
+          normalizeComparable(entry.meaning) === normalizeComparable(meaning),
       );
       if (duplicate) {
         continue;
@@ -145,11 +137,7 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     if (added === 0) {
       return 0;
     }
-    const value = JSON.stringify(nextMap);
-    patchState((draft) => {
-      draft.settings[wordMeaningMapSettingKey] = value;
-    });
-    await setSetting(wordMeaningMapSettingKey, value);
+    await persistWordMeaningMap(nextMap);
     const requestedCount = requestedTerms.size || meanings.length;
     const remaining = Math.max(0, requestedCount - added);
     showToast(
@@ -161,11 +149,14 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
   }
 
   async function persistWordMeaningMap(nextMap: WordMeaningMap) {
+    meaningMapRef.current = nextMap;
     const value = JSON.stringify(nextMap);
     patchState((draft) => {
       draft.settings[wordMeaningMapSettingKey] = value;
     });
-    await setSetting(wordMeaningMapSettingKey, value);
+    const save = meaningSaveChainRef.current.catch(() => undefined).then(() => setSetting(wordMeaningMapSettingKey, value));
+    meaningSaveChainRef.current = save;
+    await save;
   }
 
   async function saveDocumentLayoutFromResult(result: AiResultRecord) {
@@ -198,7 +189,7 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
       return;
     }
     const nextMap = Object.fromEntries(
-      Object.entries(wordMeaningMapFromSettings(state.settings)).map(([mapKey, entries]) => [mapKey, [...entries]]),
+      Object.entries(meaningMapRef.current).map(([mapKey, entries]) => [mapKey, [...entries]]),
     ) as WordMeaningMap;
     const nextEntries = (nextMap[key] ?? []).filter((entry) => entry.id !== entryId);
     if (nextEntries.length) {
@@ -209,130 +200,57 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     await persistWordMeaningMap(nextMap);
   }
 
-  async function saveOnlineDictionaryMeanings(documentId: string, terms: string[], baseMap?: WordMeaningMap) {
-    const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
+  async function createLocalMeaning(documentId: string, term: string, sentence: string, allowExisting: boolean) {
+    const key = normalizeWordKey(term);
+    const sourceSentence = sentence.trim();
+    if (!key || !sourceSentence) {
+      throw new Error(uiLanguage === "ko" ? "단어가 포함된 문장을 찾지 못했습니다." : "Could not find the sentence containing this word.");
+    }
+    if (!allowExisting && hasUsableWordMeaning(meaningMapRef.current[key])) return false;
+    const existingMeanings = [...new Set((meaningMapRef.current[key] ?? []).map(displayWordMeaning).filter(Boolean))];
+    const explainSimply = allowExisting && hasWordMeaningForContext(meaningMapRef.current[key], documentId, sourceSentence);
+    const meaning = (await generateLocalWordMeaning(key, sourceSentence, existingMeanings, explainSimply)).trim();
     const nextMap = Object.fromEntries(
-      Object.entries(baseMap ?? wordMeaningMapFromSettings(state.settings)).map(([key, entries]) => [key, [...entries]]),
+      Object.entries(meaningMapRef.current).map(([mapKey, entries]) => [mapKey, [...entries]]),
     ) as WordMeaningMap;
-    const cache = onlineDictionaryCacheFromSettings(state.settings);
-    const lookupTerms = [...new Set(terms.map(normalizeWordKey))]
-      .filter((term) => term && !term.includes(" ") && !hasUsableWordMeaning(nextMap[term]))
-      .slice(0, onlineDictionaryBatchLimit);
-    const unresolved = lookupTerms.filter(
-      (term) =>
-        cache[term]?.parserVersion !== onlineDictionaryParserVersion ||
-        !normalizeOnlineDictionaryMeaning(cache[term]?.meaning ?? ""),
-    );
-    let cacheChanged = false;
-    if (unresolved.length > 0) {
-      const fetched = await mapWithConcurrency(unresolved, 6, async (term) => ({
-        term,
-        meaning: normalizeOnlineDictionaryMeaning(await fetchOnlineDictionaryMeaning(term)),
-      }));
-      for (const item of fetched) {
-        cache[item.term] = {
-          meaning: item.meaning,
-          source: onlineDictionarySourceLabel,
-          fetchedAt: nowIso(),
-          parserVersion: onlineDictionaryParserVersion,
-        };
-        cacheChanged = true;
-      }
-    }
-    for (const term of lookupTerms) {
-      const cached = cache[term];
-      if (!cached) {
-        continue;
-      }
-      const meaning = normalizeOnlineDictionaryMeaning(cached.meaning);
-      if (cached.meaning !== meaning) {
-        cached.meaning = meaning;
-        cached.source = onlineDictionarySourceLabel;
-        cached.parserVersion = onlineDictionaryParserVersion;
-        cacheChanged = true;
-      }
-    }
-    if (cacheChanged) {
-      const cacheValue = JSON.stringify(cache);
-      patchState((draft) => {
-        draft.settings[onlineDictionaryCacheSettingKey] = cacheValue;
-      });
-      await setSetting(onlineDictionaryCacheSettingKey, cacheValue);
-    }
-    let added = 0;
-    for (const term of lookupTerms) {
-      const cached = cache[term];
-      const meaning = normalizeOnlineDictionaryMeaning(cached?.meaning ?? "");
-      if (!meaning) {
-        continue;
-      }
-      const entries = nextMap[term] ?? [];
-      const duplicate = entries.some(
-        (entry) =>
-          entry.source === "dictionary" &&
-          normalizeComparable(entry.meaning) === normalizeComparable(meaning),
-      );
-      if (duplicate) {
-        continue;
-      }
-      entries.push({
-        id: makeId("wm"),
-        word: term,
-        meaning,
-        documentId,
-        documentTitle: document?.title || document?.fileName || ui.untitledPaper,
-        context: cached.source || onlineDictionarySourceLabel,
-        createdAt: nowIso(),
-        source: "dictionary",
-      });
-      nextMap[term] = entries;
-      added += 1;
-    }
-    if (added > 0) {
-      await persistWordMeaningMap(nextMap);
-    }
-    return { added, map: nextMap };
+    if (!allowExisting && hasUsableWordMeaning(nextMap[key])) return false;
+    const entries = nextMap[key] ?? [];
+    if (entries.some((entry) =>
+      normalizeComparable(displayWordMeaning(entry)) === normalizeComparable(meaning)
+      && (!allowExisting || hasWordMeaningForContext([entry], documentId, sourceSentence)),
+    )) return false;
+    const paper = state.documents.find((item) => item.id === documentId) ?? activeDocument;
+    entries.push({
+      id: makeId("wm"),
+      word: key,
+      meaning,
+      documentId,
+      documentTitle: paper?.title || paper?.fileName || ui.untitledPaper,
+      context: sourceSentence,
+      createdAt: nowIso(),
+      source: "local-llm",
+    });
+    nextMap[key] = entries;
+    await persistWordMeaningMap(nextMap);
+    return true;
   }
 
-  async function saveFallbackDictionaryMeanings(documentId: string, terms: string[], baseMap?: WordMeaningMap) {
-    const document = state.documents.find((item) => item.id === documentId) ?? activeDocument;
-    const nextMap = Object.fromEntries(
-      Object.entries(baseMap ?? wordMeaningMapFromSettings(state.settings)).map(([key, entries]) => [key, [...entries]]),
-    ) as WordMeaningMap;
-    let added = 0;
-    for (const term of terms) {
-      const key = normalizeWordKey(term);
-      const meaning = basicDictionaryMeaning(key);
-      if (!key || !meaning || hasUsableWordMeaning(nextMap[key])) {
-        continue;
+  async function requestLocalMeaning(documentId: string, term: string, sentence: string, allowExisting: boolean) {
+    const key = normalizeWordKey(term);
+    setWordLookupLoadingKey(key);
+    setWordLookupError(null);
+    try {
+      const created = await createLocalMeaning(documentId, term, sentence, allowExisting);
+      if (allowExisting && !created) {
+        showToast(uiLanguage === "ko" ? "같은 단어 뜻이 이미 저장되어 있습니다." : "That meaning is already saved.");
       }
-      const entries = nextMap[key] ?? [];
-      const duplicate = entries.some(
-        (entry) =>
-          entry.source === "local" &&
-          normalizeComparable(entry.meaning) === normalizeComparable(meaning) &&
-          normalizeComparable(entry.context) === normalizeComparable("basic dictionary"),
-      );
-      if (duplicate) {
-        continue;
-      }
-      entries.push({
-        id: makeId("wm"),
-        word: key,
-        meaning,
-        documentId,
-        documentTitle: document?.title || document?.fileName || ui.untitledPaper,
-        context: "offline fallback dictionary",
-        createdAt: nowIso(),
-        source: "local",
-      });
-      nextMap[key] = entries;
-      added += 1;
+    } catch (error) {
+      const message = String(error);
+      setWordLookupError(message);
+      showToast(message, "error");
+    } finally {
+      setWordLookupLoadingKey((current) => current === key ? null : current);
     }
-    if (added > 0) {
-      await persistWordMeaningMap(nextMap);
-    }
-    return { added, map: nextMap };
   }
 
   async function queueMissingWordMeanings() {
@@ -346,52 +264,27 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
       return;
     }
     const candidates = extractDocumentTermCandidates(pages, activeDocument);
-    const terms = candidates.map((candidate) => candidate.term);
-    const storedTerms = terms.length ? await persistWordListForPages(activeDocument.id, pages) : activeDocumentWordList;
-    if (storedTerms.length === 0) {
-      showToast(ui.wordMeaningNoText);
-      return;
-    }
-    const currentMap = wordMeaningMapFromSettings(state.settings);
-    const missingCandidates = candidates
-      .filter((candidate) => {
-        if (!candidate.contextNeeded) {
-          return false;
-        }
-        const entries = currentMap[normalizeWordKey(candidate.term)] ?? [];
-        return !entries.some((entry) => entry.source === "ai" && entry.documentId === activeDocument.id);
-      })
-      .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term));
-    const missingTerms = missingCandidates.slice(0, wordMeaningBatchLimit).map((candidate) => candidate.term);
-    if (missingTerms.length === 0) {
+    await persistWordListForPages(activeDocument.id, pages);
+    const missing = candidates.filter((candidate) => candidate.examples.length > 0 && !hasUsableWordMeaning(meaningMapRef.current[normalizeWordKey(candidate.term)]))
+      .slice(0, 20);
+    if (missing.length === 0) {
       showToast(ui.wordMeaningNoMissing);
       return;
     }
-    void saveFallbackDictionaryMeanings(activeDocument.id, missingTerms)
-      .then((fallback) => saveOnlineDictionaryMeanings(activeDocument.id, missingTerms, fallback.map))
-      .catch((error) => showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"));
-    const queued = await queueTask(
-      wordMeaningTaskType,
-      {
-        mode: "initial",
-        words: missingTerms,
-        candidateTerms: missingCandidates.slice(0, wordMeaningBatchLimit),
-        pages,
-      },
-      { keepPanel: true },
-    );
-    if (!queued) {
-      return;
-    }
-    if (queued.status === "pending") {
-      showToast(
-        uiLanguage === "ko"
-          ? `단어 뜻 생성 중: 요청 ${missingTerms.length}개 / 전체 후보 ${storedTerms.length}개`
-          : `Building word meanings: requested ${missingTerms.length} / total candidates ${storedTerms.length}`,
-      );
-      return;
-    } else {
-      await saveWordMeaningsFromResult(queued, missingTerms);
+    setWordLookupLoadingKey("batch");
+    let created = 0;
+    try {
+      for (const candidate of missing) {
+        try {
+          if (await createLocalMeaning(activeDocument.id, candidate.term, candidate.examples[0], false)) created += 1;
+        } catch (error) {
+          showToast(String(error), "error");
+          break;
+        }
+      }
+      showToast(uiLanguage === "ko" ? `로컬 단어 뜻 ${created}개 저장` : `Saved ${created} local word meanings`);
+    } finally {
+      setWordLookupLoadingKey(null);
     }
   }
 
@@ -400,52 +293,34 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
       showToast(ui.openDocumentFirst);
       return;
     }
-    const word = normalizeWordKey(popup.word);
-    if (!word) {
-      return;
-    }
-    const pages = activePages.length ? activePages : await ensureActivePages();
-    const page = pages.find((item) => item.pageNumber === popup.page);
-    const existingMeanings = (wordMeaningMap[normalizeWordKey(word)] ?? []).map((entry) => ({
-      meaning: entry.meaning,
-      context: entry.context,
-      documentTitle: entry.documentTitle,
-    }));
-    const queued = await queueTask(
-      wordMeaningTaskType,
-      {
-        mode: "adjust",
-        words: [word],
-        page: popup.page,
-        context: popup.context,
-        existingMeanings,
-        pages: page ? [page] : pages.slice(0, 3),
-      },
-      { keepPanel: true },
-    );
-    if (!queued) {
-      return;
-    }
-    if (queued.status === "pending") {
-      showToast(ui.wordMeaningAdjustQueued);
-    } else {
-      await saveWordMeaningsFromResult(queued, [word]);
-    }
+    await requestLocalMeaning(activeDocument.id, popup.word, popup.context, true);
   }
 
   function openWordMeaningPopup(popup: WordPopup) {
-    if (markupToolKind !== "none" || !wordMeaningLookupEnabled(state.settings)) {
-      return;
-    }
-    const term = bestTermForWordPopup(popup, activeDocumentWordList, wordMeaningMap);
-    setWordPopup({ ...popup, word: term });
-    if (activeDocument && term && !term.includes(" ") && !hasUsableWordMeaning(wordMeaningMap[normalizeWordKey(term)])) {
-      const key = normalizeWordKey(term);
-      setWordLookupLoadingKey(key);
-      void saveFallbackDictionaryMeanings(activeDocument.id, [term])
-        .then((fallback) => saveOnlineDictionaryMeanings(activeDocument.id, [term], fallback.map))
-        .catch((error) => showToast(`${ui.aiTaskFailedPrefix}: ${String(error)}`, "error"))
-        .finally(() => setWordLookupLoadingKey((current) => (current === key ? null : current)));
+    if (markupToolKind !== "none" || !wordMeaningLookupEnabled(state.settings)) return;
+    const term = bestTermForWordPopup(popup, activeDocumentWordList, meaningMapRef.current);
+    showMeaningPopup({ ...popup, word: term });
+  }
+
+  function openSelectedMeaningPopup(popup: WordPopup) {
+    showMeaningPopup(popup);
+  }
+
+  function showMeaningPopup(popup: WordPopup) {
+    const term = popup.word;
+    const key = normalizeWordKey(term);
+    setWordPopup(popup);
+    setWordLookupError(null);
+    if (!key) return;
+    const counts = { ...clickCountsRef.current, [key]: (clickCountsRef.current[key] ?? 0) + 1 };
+    clickCountsRef.current = counts;
+    const value = JSON.stringify(counts);
+    patchState((draft) => { draft.settings[wordClickCountsSettingKey] = value; });
+    const save = clickSaveChainRef.current.catch(() => undefined).then(() => setSetting(wordClickCountsSettingKey, value));
+    clickSaveChainRef.current = save;
+    void save.catch((error) => showToast(String(error), "error"));
+    if (activeDocument && !hasUsableWordMeaning(meaningMapRef.current[key])) {
+      void requestLocalMeaning(activeDocument.id, term, popup.context, false);
     }
   }
 
@@ -468,6 +343,7 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     wordPopup,
     setWordPopup,
     wordLookupLoadingKey,
+    wordLookupError,
     persistWordListForPages,
     saveWordMeaningsFromResult,
     saveDocumentLayoutFromResult,
@@ -475,5 +351,6 @@ export function useWordMeaningController(input: WordMeaningControllerInput) {
     queueMissingWordMeanings,
     queueAdjustedWordMeaning,
     openWordMeaningPopup,
+    openSelectedMeaningPopup,
   };
 }

@@ -1,3 +1,7 @@
+import { ScholarlyProvider } from "./components/ScholarlyWorkspace";
+import { DiscoverView } from "./components/DiscoverView";
+import { scholarlyInvoke, readerAutomaticMetadata } from "./lib/scholarlyService";
+import type { DocumentScholarlyProfile } from "./types/scholarly";
 import { Upload } from "./components/icons";
 import { FloatingAiCard } from "./components/panels/FloatingAiCard";
 import { LinkPreviewModal } from "./components/panels/LinkPreviewModal";
@@ -15,6 +19,8 @@ import { useDocumentActions } from "./hooks/useDocumentActions";
 import { useLibraryController } from "./hooks/useLibraryController";
 import { usePagePersistence } from "./hooks/usePagePersistence";
 import { useReaderAutomation } from "./hooks/useReaderAutomation";
+import { usePaperCitations } from "./hooks/usePaperCitations";
+import { CitationPopover } from "./components/reader/CitationPopover";
 import { useWordMeaningController } from "./hooks/useWordMeaningController";
 import { useReaderLayout } from "./hooks/useReaderLayout";
 import { useReaderSelection } from "./hooks/useReaderSelection";
@@ -82,6 +88,7 @@ import {
 } from "./lib/aiPreferences";
 import {
   displayWordMeaningEntries,
+  wordClickCountsFromSettings,
   normalizeWordKey,
 } from "./lib/wordMeanings";
 import { inferYear, initialState, wordMeaningLookupEnabled } from "./lib/appState";
@@ -199,6 +206,8 @@ function App() {
   const finderDrainRunningRef = useRef(false);
   const finderDrainRequestedRef = useRef(false);
   const [mode, setMode] = useState<WorkspaceMode>("library");
+  const [discoverVisited, setDiscoverVisited] = useState(false);
+  useEffect(() => { if (mode === "discover") setDiscoverVisited(true); }, [mode]);
   const modeBeforeSettingsRef = useRef<Exclude<WorkspaceMode, "settings">>("library");
   const [activePanel, setActivePanel] = useState<PanelTab>("ai");
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
@@ -466,6 +475,7 @@ function App() {
     setLibraryQuery,
     folderFilter,
     setFolderFilter,
+    setFolderExpanded,
     newFolderName,
     setNewFolderName,
     selectedDocumentIds,
@@ -688,7 +698,8 @@ function App() {
       setPdfOutlineRows(mappedOutlineRows);
       const info = (metadata.info ?? {}) as { Title?: string; Author?: string; CreationDate?: string };
       let inferredTitle = "";
-      const shouldUpdateTitle = shouldUseAutomaticTitle(document);
+      const scholarlyProfile = isTauriRuntime() ? await scholarlyInvoke<DocumentScholarlyProfile | null>("scholarly_profile", { documentId: document.id }).catch(() => null) : null;
+      const shouldUpdateTitle = !scholarlyProfile?.confirmedFields.includes("title") && shouldUseAutomaticTitle(document);
       if (shouldUpdateTitle || pdf.numPages > 0) {
         const sampleLimit = Math.min(pdf.numPages, 5);
         for (let pageNumber = 1; pageNumber <= sampleLimit; pageNumber += 1) {
@@ -703,13 +714,7 @@ function App() {
         }
       }
       const automaticTitle = shouldUpdateTitle ? automaticPaperTitle(info.Title, inferredTitle, document.fileName) : "";
-      const updated: DocumentRecord = {
-        ...document,
-        title: automaticTitle || document.title,
-        authors: info.Author || document.authors,
-        year: document.year || inferYear(info.CreationDate),
-        pageCount: pdf.numPages,
-      };
+      const updated = readerAutomaticMetadata(document, info, automaticTitle, pdf.numPages, scholarlyProfile?.confirmedFields);
       const shouldSaveMetadata =
         updated.title !== document.title ||
         updated.authors !== document.authors ||
@@ -979,7 +984,7 @@ function App() {
       return null;
     }
     const isExplanationTask = taskType === "explainText" || taskType === "explainRegionImage";
-    const providerKind = normalizeAiProviderKind(state.settings.aiProvider);
+    const providerKind = taskType === "indexPaperCitations" ? "codex-cli" : normalizeAiProviderKind(state.settings.aiProvider);
     const optimisticChatId =
       taskType === "chatWithPaper" && typeof payload.question === "string" ? makeId("chat-pending") : "";
     if (optimisticChatId) {
@@ -1002,7 +1007,7 @@ function App() {
     }
     try {
       const needsPages =
-        ["summarizePaper", "chatWithPaper", "autoHighlight", "outlineDocument", "classifyDocumentLayout", wordMeaningTaskType].includes(taskType) ||
+        ["summarizePaper", "chatWithPaper", "autoHighlight", "outlineDocument", "indexPaperCitations", "classifyDocumentLayout", wordMeaningTaskType].includes(taskType) ||
         (taskType === "translatePage" && !payload.text);
       const payloadPages = Array.isArray(payload.pages) ? (payload.pages as PageRecord[]) : null;
       const pages = needsPages ? (payloadPages?.length ? payloadPages : await ensureActivePages()) : activePages;
@@ -1038,14 +1043,14 @@ function App() {
           : "");
       const queued = await runAiTask(providerKind, bridgePath, taskType, activeDocument, {
         ...taskPayload,
-        customPrompt: state.settings.customPrompt,
+        customPrompt: taskType === "indexPaperCitations" ? "" : state.settings.customPrompt,
         mathDelimiter: state.settings.mathDelimiter,
-        model: selectedAiModelForRun(state.settings),
+        model: selectedAiModelForRun(taskType === "indexPaperCitations" ? { ...state.settings, aiProvider: "codex-cli" } : state.settings),
         reasoningEffort: providerKind === "codex-cli" ? selectedCodexReasoningEffort(state.settings) : "",
         providerSessionId,
       });
       upsertAiResultInState(queued, optimisticChatId ? [optimisticChatId] : []);
-      if (!isExplanationTask) {
+      if (!isExplanationTask && taskType !== "indexPaperCitations") {
         setAssistantMode(taskType === "citationReason" || taskType === "externalLinkSummary" ? "quotes" : "study");
       }
       if (isExplanationTask) {
@@ -1434,6 +1439,7 @@ function App() {
     wordPopup,
     setWordPopup,
     wordLookupLoadingKey,
+    wordLookupError,
     persistWordListForPages,
     saveWordMeaningsFromResult,
     saveDocumentLayoutFromResult,
@@ -1441,6 +1447,7 @@ function App() {
     queueMissingWordMeanings,
     queueAdjustedWordMeaning,
     openWordMeaningPopup,
+    openSelectedMeaningPopup,
   } = useWordMeaningController({
     state,
     activeDocument,
@@ -1452,7 +1459,6 @@ function App() {
     uiLanguage,
     patchState,
     showToast,
-    queueTask,
     ensureActivePages,
   });
 
@@ -1598,6 +1604,8 @@ function App() {
     agentParallelTaskLimit,
   });
 
+  const paperCitations = usePaperCitations({ state, activeDocument, pdfDocument: activePdfDocument, activePages, queueTask, patchState, ensureActivePages });
+
   async function copyText(text: string, label: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -1713,11 +1721,39 @@ function App() {
   }
 
   const floatingResultIsTranslation = Boolean(
-    floatingResult && ["translateText", "translatePage"].includes(floatingResult.taskType.toString()),
+    floatingResult && floatingResult.taskType.toString() === "translatePage",
   );
+
+  function translateSelectedText() {
+    if (!selectionToolbar) return;
+    const selectedText = selectionToolbar.text.trim();
+    const matchText = normalizeComparable(selectedText).toLowerCase();
+    const sentence = sentenceUnitsForPage(activePages.find((page) => page.pageNumber === selectionToolbar.page))
+      .find((unit) => normalizeComparable(unit.source).toLowerCase().includes(matchText));
+    openSelectedMeaningPopup({
+      word: selectedText,
+      page: selectionToolbar.page,
+      sourceSentenceId: sentence?.id,
+      context: sentence?.source ?? selectedText,
+      x: selectionToolbar.viewportRect?.left ?? selectionToolbar.x,
+      y: selectionToolbar.viewportRect?.top ?? selectionToolbar.y,
+      side: "right",
+    });
+    setSelectionToolbar(null);
+    setTextSelectionPreview(null);
+    window.getSelection()?.removeAllRanges();
+  }
 
   return (
     <UiStringsContext.Provider value={ui}>
+    <ScholarlyProvider state={state} ready={startupReady} ko={uiLanguage === "ko"} openedDocument={mode === "reader" && !isBusy && activePdfDocument ? activeDocument : null}
+      notify={showToast} onOpen={(document) => void loadPdfBytes(document)}
+      onDocumentChanged={async (document) => {
+        patchState((draft) => { draft.documents = [document, ...draft.documents.filter((item) => item.id !== document.id)]; });
+        await refreshLibrary();
+      }}
+      saveSetting={(key, value) => { patchState((draft) => { draft.settings[key] = value; }); void setSetting(key, value); }}
+    >
     <div
       className="app-shell"
       data-theme={state.settings.theme}
@@ -1750,6 +1786,7 @@ function App() {
           rightPanelOpen={rightPanelOpen}
           shareReady={Boolean(activeDocument && (activePdfDocument || Object.keys(pageImages).length > 0))}
           onOpenLibrary={openLibraryMode}
+          onOpenDiscover={() => setMode("discover")}
           onOpenSettings={toggleSettingsMode}
           onZoomIn={() => { setFitPageWithPanel(false); commitZoomKeepingView(displayZoom + 0.1); }}
           onZoomOut={() => { setFitPageWithPanel(false); commitZoomKeepingView(displayZoom - 0.1); }}
@@ -1800,6 +1837,8 @@ function App() {
           onChange={(event) => event.target.files && void handleFiles(event.target.files)}
         />
 
+        {(mode === "discover" || discoverVisited) && <div className="discover-workspace" hidden={mode !== "discover"}><DiscoverView /></div>}
+
         {mode === "library" && (
           <LibraryManagerView
             state={state}
@@ -1811,12 +1850,14 @@ function App() {
             selectedDocumentIds={selectedDocumentIds}
             onLibraryQuery={setLibraryQuery}
             onFolderFilter={setFolderFilter}
+            onFolderExpanded={setFolderExpanded}
             onNewFolderName={setNewFolderName}
             onCreateFolder={(parentId, name) => void createFolder(parentId, name)}
             onCreateChildFolder={(parentId) => void createChildFolder(parentId)}
             onRenameFolder={(folder) => void renameFolder(folder)}
             onDeleteFolder={(folder) => void deleteFolderTree(folder)}
             onPickFile={() => void pickPdfFiles()}
+            onDiscover={() => setMode("discover")}
             onOpen={(document) => void loadPdfBytes(document)}
             onSelect={(id) => setActiveDocumentId(id)}
             onToggleSelect={toggleLibraryDocumentSelection}
@@ -1840,6 +1881,14 @@ function App() {
             activeAnnotations={activeAnnotations}
             activeAiResults={activeAiResults}
             activeCitations={activeCitations}
+            paperCitations={paperCitations.references}
+            citationIndexStatus={paperCitations.indexStatus}
+            onRetryCitationIndex={() => void paperCitations.retryIndex()}
+            onCitationClick={(referenceId, label, x, y) => {
+              setWordPopup(null);
+              setLinkPreview(null);
+              paperCitations.openCitation(referenceId, label, x, y);
+            }}
             activeNote={activeNote}
             activeOutlineRows={activeOutlineRows}
             activeOutlineId={activeOutlineId}
@@ -1988,7 +2037,7 @@ function App() {
         <SelectionToolbarView
           toolbar={selectionToolbar}
           onExplain={() => void explainSelection()}
-          onTranslate={() => void queueTask("translateText", { text: selectionToolbar.text, page: selectionToolbar.page })}
+          onTranslate={translateSelectedText}
           onComment={() => void addCommentFromSelection()}
           onChat={() => {
             setChatDraft(selectionToolbar.text);
@@ -2022,7 +2071,9 @@ function App() {
           ui={ui}
           popup={wordPopup}
           entries={displayWordMeaningEntries(wordMeaningMap[normalizeWordKey(wordPopup.word)] ?? [])}
+          clickCount={wordClickCountsFromSettings(state.settings)[normalizeWordKey(wordPopup.word)] ?? 0}
           loading={wordLookupLoadingKey === normalizeWordKey(wordPopup.word)}
+          error={wordLookupError}
           onClose={() => setWordPopup(null)}
           onAdjust={() => void queueAdjustedWordMeaning(wordPopup)}
           onOpenSentenceActions={() => {
@@ -2047,6 +2098,13 @@ function App() {
           onSummarize={(preview) => void summarizeLinkPreview(preview)}
         />
       )}
+      {paperCitations.popup && paperCitations.references.find((reference) => reference.id === paperCitations.popup?.referenceId) && <CitationPopover
+        key={`${paperCitations.popup.documentId}:${paperCitations.popup.referenceId}`}
+        popup={paperCitations.popup}
+        reference={paperCitations.references.find((reference) => reference.id === paperCitations.popup?.referenceId)!}
+        onClose={() => paperCitations.setPopup(null)}
+        onRetry={() => paperCitations.retryReference(paperCitations.popup!.referenceId)}
+      />}
 
       {dragActive && (
         <div className="drop-overlay">
@@ -2069,6 +2127,7 @@ function App() {
         </div>
       )}
     </div>
+    </ScholarlyProvider>
     </UiStringsContext.Provider>
   );
 }

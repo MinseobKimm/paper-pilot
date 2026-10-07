@@ -62,7 +62,7 @@ button {
   font-size: calc(14px * var(--font-scale, 1));
 }
 
-.app-shell[data-theme="ink"] {
+.app-shell[data-theme="ink"], .scholarly-overlays[data-theme="ink"] {
   --rail: #071315;
   --paper: #141a1b;
   --surface: #0e1516;
@@ -388,6 +388,39 @@ button {
 
 .folder-tree-row .folder-row {
   min-width: 0;
+  gap: 0;
+  padding: 0;
+}
+
+.folder-tree-toggle,
+.folder-tree-select {
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.folder-tree-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 31px;
+  align-self: stretch;
+  padding: 0;
+  border-radius: 7px;
+}
+
+.folder-tree-toggle:hover {
+  background: rgba(78, 205, 196, 0.16);
+}
+
+.folder-tree-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px 6px 0;
+  text-align: left;
 }
 
 .folder-row .folder-label {
@@ -407,8 +440,8 @@ button {
 }
 
 .folder-row-spacer {
-  width: 13px;
-  flex: 0 0 13px;
+  width: 31px;
+  flex: 0 0 31px;
 }
 
 .folder-row-actions {
@@ -1454,6 +1487,30 @@ select:disabled {
   background-size: 28px 28px;
 }
 
+/* Explicit dimensions keep WebKit scrollbars visible with macOS overlay scrolling. */
+.pdf-stage::-webkit-scrollbar {
+  width: 12px;
+  height: 16px;
+}
+
+.pdf-stage::-webkit-scrollbar-track,
+.pdf-stage::-webkit-scrollbar-corner {
+  background: var(--surface-strong);
+}
+
+.pdf-stage::-webkit-scrollbar-thumb {
+  border: 3px solid var(--surface-strong);
+  border-radius: 999px;
+  background: var(--muted);
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.pdf-stage::-webkit-scrollbar-thumb:hover,
+.pdf-stage::-webkit-scrollbar-thumb:active {
+  background: var(--teal);
+}
+
 .pdf-stage.region-mode {
   cursor: crosshair;
 }
@@ -1619,6 +1676,66 @@ select:disabled {
 .pdf-reference-hit {
   border-bottom: 1px dashed rgba(113, 74, 178, 0.55);
 }
+
+.pdf-citation-hit {
+  z-index: 1;
+  border-bottom: 1px dotted var(--teal);
+  border-radius: 2px;
+}
+
+.pdf-citation-hit:hover,
+.pdf-citation-hit:focus-visible {
+  border-color: var(--teal);
+  background: rgba(29, 148, 142, 0.14);
+}
+
+.citation-index-status {
+  position: absolute;
+  bottom: 24px;
+  left: 12px;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 40px);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.citation-index-status button { border: 0; background: transparent; color: var(--teal); }
+
+.citation-popover {
+  position: fixed;
+  z-index: 1200;
+  width: min(390px, calc(100vw - 24px));
+  max-height: min(640px, calc(100vh - 84px));
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.citation-popover-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.citation-popover h3 { margin: 12px 0 6px; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.citation-popover p { margin: 6px 0 10px; overflow-wrap: anywhere; }
+.citation-popover-meta { color: var(--muted); font-size: 12px; }
+.citation-popover-error { color: var(--coral); }
+.citation-popover-paper + .citation-popover-paper { margin-top: 14px; padding-top: 8px; border-top: 1px solid var(--line); }
+.citation-popover button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
+.citation-popover button.primary { background: var(--teal); color: white; }
+.citation-popover-head button { padding: 5px; background: transparent; }
+.citation-popover-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.citation-popover summary { cursor: pointer; color: var(--teal); }
+.citation-popover-reference { padding-top: 8px; margin-top: 8px; border-top: 1px solid var(--line); }
 
 .pdf-reference-hit:hover,
 .pdf-reference-hit:focus-visible {
@@ -2130,6 +2247,16 @@ select:disabled {
   line-height: 1.55;
   word-break: keep-all;
   overflow-wrap: break-word;
+}
+
+.word-meaning-loading {
+  color: #60706b;
+  font-size: 12px;
+}
+
+.word-meaning-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .word-meaning-row button {
@@ -4975,3 +5102,91 @@ select:disabled {
 [data-theme="ink"] .ai-table th,
 [data-theme="ink"] .ai-table td { border-color: #3b4542; }
 [data-theme="ink"] .ai-table th { background: #273732; color: #bfe5d6; }
+
+/* Online discovery shares the library surfaces and remains independent of the reader. */
+.library-discover-button { display:flex; align-items:center; gap:10px; width:100%; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:var(--paper); color:var(--text); margin:12px 0; text-align:left; }
+.discover-view { flex:1; min-height:0; overflow:auto; padding:32px clamp(24px,4vw,64px) 40px; background:var(--surface); }
+.discover-workspace { flex:1; min-height:0; display:flex; }
+.discover-workspace[hidden] { display:none; }
+.discover-header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; max-width:1180px; margin:0 auto 28px; }
+.discover-eyebrow { color:var(--teal); font-size:12px; font-weight:700; letter-spacing:.06em; }
+.discover-header h1 { font-size:30px; letter-spacing:-.04em; margin:8px 0; }
+.discover-header p { margin:0; color:var(--muted); }
+.discover-search, .discover-results, .discover-results-header, .discover-view > .scholarly-pagination, .discover-view > .scholarly-error, .discover-view > .scholarly-notice, .library-scan { max-width:1180px; margin-left:auto; margin-right:auto; }
+.discover-search { padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:14px; }
+.scholarly-search-row { display:flex; align-items:center; gap:10px; }
+.scholarly-search-row input { flex:1; min-width:0; padding:11px 12px; background:var(--surface); color:var(--text); border:1px solid var(--line); border-radius:8px; }
+.discover-view button, .scholarly-link-dialog button, .online-paper-panel button, .openalex-key-settings button, .scholarly-download button { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--paper); }
+.discover-view button:hover, .scholarly-link-dialog button:hover, .online-paper-panel button:hover { border-color:var(--teal); }
+.discover-view button:disabled, .scholarly-link-dialog button:disabled, .online-paper-panel button:disabled { opacity:.5; cursor:default; }
+.discover-view button.primary, .scholarly-link-dialog button.primary, .online-paper-panel button.primary { color:white; background:var(--teal); border-color:var(--teal); }
+.discover-filters { display:flex; align-items:flex-end; flex-wrap:wrap; gap:14px; margin-top:16px; }
+.discover-filters label { display:grid; gap:5px; color:var(--muted); font-size:12px; }
+.discover-filters select, .discover-filters input { padding:8px 12px; color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:7px; min-width:150px; }
+.discover-results-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:22px; margin-bottom:16px; color:var(--muted); }
+.discover-results { display:grid; gap:14px; }
+.scholarly-paper { padding:22px 24px; background:var(--paper); border:1px solid var(--line); border-radius:12px; min-width:0; }
+.scholarly-paper h3 { font-size:18px; line-height:1.45; margin:10px 0 8px; letter-spacing:-.02em; }
+.scholarly-paper-meta { display:flex; flex-wrap:wrap; gap:6px; font-size:11px; color:var(--muted); }
+.scholarly-paper-meta > span { background:var(--surface-strong); padding:3px 7px; border-radius:5px; }
+.scholarly-paper-meta .scholarly-source { color:var(--teal); font-weight:700; }
+.scholarly-paper-meta .scholarly-owned { color:var(--teal); border:1px solid var(--teal); }
+.scholarly-authors { margin:0 0 10px; color:var(--muted); font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+.scholarly-paper-dates { display:flex; flex-wrap:wrap; gap:16px; color:var(--muted); font-size:11px; }
+.scholarly-abstract { color:var(--text); font-size:13px; line-height:1.7; margin:12px 0 4px; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+.scholarly-abstract.expanded { display:block; }
+button.scholarly-text-button { padding:0; border:none; color:var(--teal); background:transparent; font-size:12px; }
+.scholarly-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.scholarly-pagination { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:14px; margin-top:24px; }
+.scholarly-pagination small { color:var(--muted); font-size:11px; }
+.scholarly-tabs { display:flex; gap:4px; padding:4px; background:var(--surface-strong); border-radius:9px; flex-wrap:wrap; }
+.scholarly-tabs button { background:transparent; border:1px solid transparent; font-size:12px; }
+.scholarly-tabs button.active { background:var(--paper); border-color:var(--line); color:var(--teal); }
+.discover-empty { padding:60px 20px; text-align:center; color:var(--muted); }
+.scholarly-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px; }
+.scholarly-heading h2, .scholarly-heading h3 { margin:0; }
+.scholarly-heading p { color:var(--muted); margin:8px 0 0; }
+.scholarly-modal-backdrop { position:fixed; z-index:220; inset:0; background:rgba(9,24,27,.44); display:grid; place-items:center; padding:24px; }
+.scholarly-link-dialog { background:var(--paper); color:var(--text); border-radius:16px; padding:26px; width:min(900px,100%); max-height:calc(100vh - 48px); overflow:auto; box-shadow:var(--shadow); }
+.scholarly-candidates { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:18px 0; }
+button.scholarly-candidate { align-items:flex-start; text-align:left; display:flex; flex-direction:column; gap:6px; padding:14px; }
+.scholarly-candidate span { font-size:11px; color:var(--muted); }
+.scholarly-candidate.selected { outline:2px solid var(--teal); }
+.scholarly-compare { border-collapse:collapse; width:100%; font-size:12px; table-layout:fixed; }
+.scholarly-compare th, .scholarly-compare td { text-align:left; vertical-align:top; padding:10px; border:1px solid var(--line); overflow-wrap:anywhere; }
+.scholarly-compare th:first-child { width:95px; }
+.scholarly-compare td { max-height:180px; }
+.scholarly-compare input { margin-right:6px; }
+.scholarly-error { color:var(--coral); padding:12px; border:1px solid var(--coral); border-radius:8px; overflow-wrap:anywhere; }
+.scholarly-error button { margin-left:12px; }
+.scholarly-notice { font-size:12px; color:var(--muted); background:var(--surface-strong); padding:12px; border-radius:8px; overflow-wrap:anywhere; }
+.online-paper-panel { border:1px solid var(--line); border-radius:10px; padding:14px; font-size:12px; }
+.online-paper-panel .scholarly-heading { align-items:flex-start; flex-wrap:wrap; }
+.online-paper-panel button { font-size:11px; padding:6px 8px; }
+.online-paper-panel h3 { font-size:13px; }
+.online-paper-panel .scholarly-paper { padding:12px; margin-top:10px; }
+.online-paper-panel .scholarly-paper h3 { font-size:13px; }
+.scholarly-profile { display:grid; grid-template-columns:80px minmax(0,1fr); gap:8px; margin:16px 0; }
+.scholarly-profile dt { color:var(--muted); }
+.scholarly-profile dd { margin:0; overflow-wrap:anywhere; }
+.scholarly-download { position:fixed; z-index:230; right:24px; bottom:24px; width:min(430px,calc(100vw - 48px)); display:grid; gap:10px; padding:20px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+.scholarly-download progress { width:100%; accent-color:var(--teal); }
+.scholarly-download p { color:var(--coral); overflow-wrap:anywhere; }
+.scholarly-scan-intro { padding:24px; border:1px solid var(--line); background:var(--paper); border-radius:12px; }
+.scholarly-scan-intro h2 { margin:0; font-size:20px; }
+.scholarly-scan-intro p { color:var(--muted); max-width:780px; line-height:1.7; }
+.scholarly-scan-controls { margin:20px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.scholarly-scan-controls progress { flex:1; min-width:120px; accent-color:var(--teal); }
+.scan-items { display:grid; gap:8px; }
+.scan-item { display:flex; align-items:center; gap:16px; padding:16px; background:var(--paper); border:1px solid var(--line); border-radius:9px; }
+.scan-item > div { flex:1; min-width:0; }
+.scan-item strong { overflow-wrap:anywhere; }
+.scan-item p { color:var(--muted); margin:5px 0 0; font-size:12px; overflow-wrap:anywhere; }
+.scan-status { color:var(--muted); background:var(--surface-strong); padding:5px 10px; border-radius:6px; min-width:80px; text-align:center; font-size:11px; }
+.scan-status.review, .scan-status.linked { color:var(--teal); }
+.scan-status.failed { color:var(--coral); }
+.openalex-key-settings { padding:20px; border:1px solid var(--line); border-radius:12px; background:var(--paper); margin-bottom:24px; }
+.openalex-key-settings h3 { margin:0 0 10px; }
+.openalex-key-settings p { color:var(--muted); }
+.openalex-key-settings input { max-width:480px; }
+@media (max-width:1100px) { .discover-header { align-items:flex-start; flex-direction:column; } .discover-filters select { min-width:125px; } }

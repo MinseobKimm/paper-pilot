@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type WheelEvent } from "react";
-import { Archive, BookOpen, Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, FileText, FolderOpen, FolderPlus, Grid2X2, List, MoreVertical, PenLine, Search, Trash2, Upload, X } from "./icons";
+import { Archive, BookOpen, Bookmark, BookmarkCheck, ChevronDown, ChevronLeft, ChevronRight, FileText, FolderOpen, FolderPlus, Grid2X2, List, MoreVertical, PenLine, Search, Trash2, Upload, X } from "./icons";
 import type { AppStateRecord, DocumentRecord, FolderRecord, NoteRecord } from "../types";
-import { documentFolderId, folderDescendantIds, folderDisplayName, folderPathLabel, folderTreeRows, sortedFolderChildren } from "../lib/libraryTree";
+import { documentFolderId, folderDescendantIds, folderDisplayName, folderExpandedSettingKey, folderPathLabel, folderTreeRows, sortedFolderChildren } from "../lib/libraryTree";
 import { readingStatusFromSettings, readingStatusOption, readingStatusOptions, type ReadingStatus } from "../lib/readingStatus";
 import { useUiStrings } from "../lib/uiStrings";
 import { isTauriRuntime } from "../lib/tauri";
@@ -479,9 +479,11 @@ type LibraryManagerViewProps = {
   onNewFolderName: (value: string) => void;
   onCreateFolder: (parentId?: string, name?: string) => void;
   onCreateChildFolder: (parentId: string) => void;
+  onFolderExpanded: (folderId: string, expanded: boolean) => void;
   onRenameFolder: (folder: FolderRecord) => void;
   onDeleteFolder: (folder: FolderRecord) => void;
   onPickFile: () => void;
+  onDiscover: () => void;
   onOpen: (document: DocumentRecord) => void;
   onSelect: (id: string) => void;
   onToggleSelect: (id: string, selected: boolean) => void;
@@ -497,7 +499,18 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
   const ui = useUiStrings();
   const [displayMode, setDisplayMode] = useState<LibraryDisplayMode>("browser");
   const [inspectedDocument, setInspectedDocument] = useState<DocumentRecord | null>(null);
+  const expandedFolderIds = new Set([
+    "root",
+    ...props.state.folders
+      .filter((folder) => props.state.settings[folderExpandedSettingKey(folder.id)] === "true")
+      .map((folder) => folder.id),
+  ]);
   const folderRows = folderTreeRows(props.state.folders, props.state.documents);
+  const foldersById = new Map(props.state.folders.map((folder) => [folder.id, folder]));
+  const visibleFolderRows = folderRows.filter((row) =>
+    row.folder.id !== "root" &&
+    ancestorFolderIds(foldersById, row.folder.id, "root").slice(1).every((id) => expandedFolderIds.has(id)),
+  );
   const folderStats = useMemo(() => new Map(folderRows.map((row) => [row.folder.id, row])), [folderRows]);
   const folderOptions = folderRows.map((row) => ({
     id: row.folder.id,
@@ -555,6 +568,7 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
           <strong>{ui.addPdf}</strong>
           <span>{isTauriRuntime() ? ui.originalFolderLibrary : ui.addPdfToSelectedFolder}</span>
         </div>
+        <button className="library-discover-button" onClick={props.onDiscover}><Search size={18} /><span>{props.state.settings.uiLanguage === "en" ? "Discover arXiv papers" : "arXiv 논문 탐색"}</span></button>
         <div className="folder-tools">
           <div className="folder-tools-head">
             <strong>{ui.folders}</strong>
@@ -580,22 +594,36 @@ export function LibraryManagerView(props: LibraryManagerViewProps) {
             <span className="folder-label">{ui.libraryRoot}</span>
           </button>
           <div className="folder-tree">
-            {folderRows.filter((row) => row.folder.id !== "root").map((row) => (
+            {visibleFolderRows.map((row) => (
               <div
                 key={row.folder.id}
                 className="folder-tree-row"
                 data-folder-id={row.folder.id}
                 style={{ "--folder-depth": Math.max(0, row.depth - 1) } as CSSProperties}
               >
-                <button
+                <div
                   className={props.folderFilter === row.folder.id ? "folder-row active" : "folder-row"}
-                  onClick={() => props.onFolderFilter(row.folder.id)}
-                  title={row.folder.sourcePath || folderPathLabel(props.state.folders, row.folder.id, ui)}
                 >
-                  {row.childCount > 0 ? <ChevronRight size={13} /> : <span className="folder-row-spacer" />}
-                  <FolderOpen size={16} />
-                  <span className="folder-label">{folderDisplayName(row.folder, ui)}</span>
+                  {row.childCount > 0 ? (
+                    <button
+                      className="folder-tree-toggle"
+                      aria-expanded={expandedFolderIds.has(row.folder.id)}
+                      aria-label={`${expandedFolderIds.has(row.folder.id) ? ui.collapseFolder : ui.expandFolder}: ${folderDisplayName(row.folder, ui)}`}
+                      title={expandedFolderIds.has(row.folder.id) ? ui.collapseFolder : ui.expandFolder}
+                      onClick={() => props.onFolderExpanded(row.folder.id, !expandedFolderIds.has(row.folder.id))}
+                    >
+                      {expandedFolderIds.has(row.folder.id) ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                    </button>
+                  ) : <span className="folder-row-spacer" />}
+                  <button
+                    className="folder-tree-select"
+                    onClick={() => props.onFolderFilter(row.folder.id)}
+                    title={row.folder.sourcePath || folderPathLabel(props.state.folders, row.folder.id, ui)}
+                  >
+                    <FolderOpen size={16} />
+                    <span className="folder-label">{folderDisplayName(row.folder, ui)}</span>
                   </button>
+                </div>
                 {!isTauriRuntime() && <div className="folder-row-actions">
                   <button data-folder-action="create-child" title={ui.createChildFolder} onClick={() => props.onCreateChildFolder(row.folder.id)}>
                     <FolderPlus size={13} />

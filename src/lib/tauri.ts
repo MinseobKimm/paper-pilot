@@ -496,6 +496,14 @@ export async function setSetting(key: string, value: string): Promise<void> {
   saveBrowserState(state);
 }
 
+export async function generateLocalWordMeaning(word: string, sentence: string, existingMeanings: string[] = [], explainSimply = false): Promise<string> {
+  const invoke = await getInvoke();
+  if (!invoke) {
+    throw new Error("Local word meanings require the macOS app and Ollama.");
+  }
+  return invoke<string>("generate_local_word_meaning", { word, sentence, existingMeanings, explainSimply });
+}
+
 export async function setSettings(entries: Array<[string, string]>): Promise<void> {
   if (entries.length === 0) return;
   const invoke = await getInvoke();

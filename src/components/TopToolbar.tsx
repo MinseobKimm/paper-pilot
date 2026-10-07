@@ -16,6 +16,7 @@ type TopToolbarProps = {
   rightPanelOpen: boolean;
   shareReady: boolean;
   onOpenLibrary: () => void;
+  onOpenDiscover: () => void;
   onOpenSettings: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -40,7 +41,7 @@ export function TopToolbar(props: TopToolbarProps) {
       ? props.document?.title || "Paper Pilot"
       : props.mode === "library"
         ? props.ui.library
-        : props.ui.settings;
+        : props.mode === "discover" ? "arXiv" : props.ui.settings;
   const zoomPercent = Math.round(props.zoom * 100);
   const zoomOptions = [80, 100, 105, 113, 125, 150, 175, 200, 250, 300, 400, 500, 750, 1000];
   const resolvedZoomOptions = zoomOptions.includes(zoomPercent)
@@ -52,6 +53,7 @@ export function TopToolbar(props: TopToolbarProps) {
         <button title={props.ui.library} data-tooltip={props.ui.library} aria-label={props.ui.library} className={props.mode === "library" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenLibrary}>
           <Library size={17} />
         </button>
+        <button title="arXiv" aria-label="arXiv" className={props.mode === "discover" ? "toolbar-icon active" : "toolbar-icon"} onClick={props.onOpenDiscover}><Search size={17} /></button>
         {props.mode === "reader" && (
           <div className="toolbar-reader-toggles" aria-label="Reader panels">
             <button
